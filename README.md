@@ -1,4 +1,51 @@
-# ARCHIVED
+# Linux 7.2.9 fork
+
+This fork updates the builder for Linux **7.2.9**. The original project was
+archived; its notice and historical documentation are retained below.
+
+Build on an **x86_64 Debian/Ubuntu system**:
+
+```sh
+./build.sh 7.2.9
+```
+
+The builder downloads the pinned `cachyos-7.2.9-2` source archive, verifies its
+SHA-256, adds BORE 6.8.0 and the Debian headers configuration fix, and builds
+with GCC. The configuration is migrated from PsyCachy's Debian/Ubuntu config
+and targets generic x86-64 CPUs. Core CachyOS changes, BBR3, and ADIOS are already in
+the source archive. See [source provenance](src/patches/7.2.9/SOURCES.md).
+BBR3 is built as the `tcp_bbr3` module, with congestion-control name `bbr3`.
+The migrated configuration uses full preemption with runtime selection enabled;
+Linux 7.2 no longer offers the previous voluntary default in x86 Kconfig.
+
+Missing build and packaging dependencies are installed through `sudo apt-get`.
+Set `INSTALL_DEPS=0` to use a toolchain you have supplied yourself.
+If `pahole` 1.26 or newer is unavailable, the builder disables BTF and sched_ext;
+BORE still works, but BTF-dependent BPF programs need a newer `pahole` build.
+To enable BTF, install `pahole` >= 1.26 before running the builder.
+
+To check source preparation without compiling the complete kernel:
+
+```sh
+./build.sh 7.2.9 --prepare-only
+```
+
+The prepared tree is `src/build-7.2.9`; rerunning the builder reuses it after
+checking its patch fingerprint. Edit `src/config` to customize the configuration.
+Set `JOBS=4 ./build.sh 7.2.9` to limit compilation parallelism. Packages are
+written to `src/`; the builder does not install the resulting kernel.
+
+Only 7.2.9 is supported by this fork. Other versions need matching sources and
+patches. Patch failures stop the build immediately without prompting for files.
+If you previously ran the archived builder, its partially patched
+`src/linux-7.2.9` directory is preserved and is not used by the new builder.
+
+The documentation below describes the archived project, including its separate
+`proto` branch builder; it does not describe this fork's `build.sh`.
+
+Builder regression tests: `python3 -m unittest discover -s tests -v`.
+
+# Original archive notice
 
 As of June 9th, 2026, this project has been archived as I no longer have the time to commit to it as my focus has been on LinuxToys. Feel free to fork it if you wish to continue it, and I'll be happy to help in any way I can. Below this message is the old readme.
 

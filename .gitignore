@@ -1,1 +1,10 @@
 .cache
+__pycache__/
+/src/*.tar.gz
+/src/*.tar.gz.part
+/src/linux-*/
+/src/build-*/
+/src/.prepare-*/
+/src/*.deb
+/src/*.buildinfo
+/src/*.changes
