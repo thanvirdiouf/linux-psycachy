@@ -45,6 +45,27 @@ The documentation below describes the archived project, including its separate
 
 Builder regression tests: `python3 -m unittest discover -s tests -v`.
 
+## GitHub Actions packages
+
+The [Build Debian kernel packages](.github/workflows/build-debs.yml) workflow
+validates the builder, then compiles and packages Linux 7.2.9 on Ubuntu 24.04.
+It runs when build-related files change on `master` or `main`, on pull requests,
+and manually through **Actions → Build Debian kernel packages → Run workflow**.
+The workflow becomes available after these commits are pushed to GitHub.
+
+After a successful run, open its **Artifacts** section and download
+`psycachy-7.2.9-amd64-<run-id>-<attempt>`. It contains the image, headers, and
+libc development `.deb` packages, `SHA256SUMS`, the resolved `kernel.config`,
+and build metadata. Extract the artifact and run `sha256sum --check SHA256SUMS`
+to verify the packages. Artifacts are retained for 14 days. A separate build-log
+artifact is uploaded on success or failure.
+
+CI builds omit debug information, BTF, and sched_ext to keep disk usage manageable
+on standard runners. They use `genksyms` for module versioning and retain generic
+x86-64 hardware support, BORE, BBR3, and ADIOS. Local builds continue to use
+`src/config` as configured above. The workflow uploads artifacts; it does not
+publish a GitHub Release or install the kernel.
+
 # Original archive notice
 
 As of June 9th, 2026, this project has been archived as I no longer have the time to commit to it as my focus has been on LinuxToys. Feel free to fork it if you wish to continue it, and I'll be happy to help in any way I can. Below this message is the old readme.

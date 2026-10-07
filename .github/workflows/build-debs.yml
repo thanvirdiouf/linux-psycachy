@@ -1,0 +1,137 @@
+name: Build Debian kernel packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - build.sh
+      - src/config
+      - src/patches/**
+      - tests/**
+      - .github/workflows/build-debs.yml
+  pull_request:
+    paths:
+      - build.sh
+      - src/config
+      - src/patches/**
+      - tests/**
+      - .github/workflows/build-debs.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-debs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_VERSION: '7.2.9'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  validate:
+    name: Validate builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check shell syntax and run regression tests
+        shell: bash
+        run: |
+          bash -n build.sh
+          python3 -m unittest discover -s tests -v
+
+  build:
+    name: Build amd64 Debian packages
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Free space for kernel compilation
+        run: |
+          # These SDKs are preinstalled on this disposable runner, but unused here.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          if command -v docker >/dev/null; then
+            sudo docker image prune --all --force
+          fi
+          df -h .
+
+      - name: Prepare sources and install build dependencies
+        run: |
+          ./build.sh "$KERNEL_VERSION" --prepare-only 2>&1 | tee build.log
+
+      - name: Configure a build without debug information
+        run: |
+          # Full DWARF plus debug .debs can exhaust a hosted runner's disk.
+          # Keep generic hardware support, BORE, BBR3, ADIOS, and module versioning.
+          "src/build-$KERNEL_VERSION/scripts/config" --file src/config \
+            --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
+            --disable DEBUG_INFO_DWARF4 --disable DEBUG_INFO_DWARF5 \
+            --enable DEBUG_INFO_NONE \
+            --disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES \
+            --disable SCHED_CLASS_EXT --disable GDB_SCRIPTS \
+            --disable GENDWARFKSYMS --enable GENKSYMS
+
+      - name: Compile and package the kernel
+        run: |
+          export JOBS="$(nproc)"
+          ./build.sh "$KERNEL_VERSION" 2>&1 | tee -a build.log
+
+      - name: Verify and collect Debian packages
+        run: |
+          shopt -s nullglob
+          packages=(src/*.deb)
+          for prefix in linux-image linux-headers linux-libc-dev; do
+            matches=(src/"$prefix"*.deb)
+            if [[ ${#matches[@]} -eq 0 ]]; then
+              echo "Missing expected package: $prefix" >&2
+              exit 1
+            fi
+          done
+          mkdir -p dist
+          for package in "${packages[@]}"; do
+            dpkg-deb --info "$package"
+            test "$(dpkg-deb --field "$package" Architecture)" = amd64
+            cp "$package" dist/
+          done
+          metadata=(src/*.buildinfo src/*.changes)
+          if [[ ${#metadata[@]} -gt 0 ]]; then
+            cp "${metadata[@]}" dist/
+          fi
+          cp "src/build-$KERNEL_VERSION/.config" dist/kernel.config
+          printf 'Kernel: %s\nCommit: %s\nRun: %s\n' \
+            "$KERNEL_VERSION" "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD.txt
+          (cd dist && sha256sum ./*.deb > SHA256SUMS)
+
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: psycachy-${{ env.KERNEL_VERSION }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: psycachy-build-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build.log
+            src/build-${{ env.KERNEL_VERSION }}/.config
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
