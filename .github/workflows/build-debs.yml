@@ -8,6 +8,11 @@ on:
         required: true
         default: '7.2.9'
         type: string
+      publish_release:
+        description: Publish a GitHub Release after a successful build
+        required: true
+        default: false
+        type: boolean
   push:
     branches: [master, main]
     paths:
@@ -58,6 +63,8 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 330
+    outputs:
+      artifact-id: ${{ steps.packages.outputs.artifact-id }}
     defaults:
       run:
         shell: bash
@@ -124,6 +131,7 @@ jobs:
           (cd dist && sha256sum ./*.deb > SHA256SUMS)
 
       - name: Upload Debian packages
+        id: packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: psycachy-${{ env.KERNEL_VERSION }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
@@ -143,3 +151,61 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+
+      - name: Verify release packages
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          test -s kernel.config
+          test -s BUILD.txt
+          shopt -s nullglob
+          for prefix in linux-image linux-headers linux-libc-dev; do
+            packages=("$prefix"*.deb)
+            if [[ ${#packages[@]} -eq 0 ]]; then
+              echo "Missing release package: $prefix" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish packages and release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="psycachy-$KERNEL_VERSION-build-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<EOF
+          PsyCachy Linux $KERNEL_VERSION for generic x86-64 Debian/Ubuntu systems.
+
+          Built with GCC, BORE, BBR3, and ADIOS. CI builds omit debug information,
+          BTF, and sched_ext. The resolved configuration is attached as kernel.config.
+
+          Download the image, headers, and libc development .deb packages and
+          SHA256SUMS, then verify them with: sha256sum --check SHA256SUMS
+
+          Source commit: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA
+          Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          gh release create "$tag" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "PsyCachy $KERNEL_VERSION (build $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)" \
+            --notes-file "$notes"
+          printf 'Published [%s](%s/%s/releases/tag/%s)\n' \
+            "$tag" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$tag" >> "$GITHUB_STEP_SUMMARY"

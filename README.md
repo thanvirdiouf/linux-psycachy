@@ -94,11 +94,23 @@ to verify the packages. Artifacts are retained for 14 days. A separate build-log
 artifact is uploaded on success or failure.
 For another selected version, the artifact name includes that version instead.
 
+To also publish the packages, select **Publish a GitHub Release after a successful
+build** when starting a manual run. After compilation, a separate job downloads
+the build artifact, verifies its package checksums, and publishes all its files
+as release assets, including the individual `.deb` files. Release notes link to
+the source commit and workflow run.
+
+The release tag is `psycachy-<version>-build-<run-number>-<attempt>` and points to
+the commit used for the build. Each run attempt gets a distinct tag, so repeated
+builds do not overwrite existing releases. Release assets remain available after
+the 14-day Actions artifact retention period. Push and pull-request builds only
+upload artifacts. Publication uses the built-in `GITHUB_TOKEN`; only the release
+job receives `contents: write`, and no additional secret is needed.
+
 CI builds omit debug information, BTF, and sched_ext to keep disk usage manageable
 on standard runners. They use `genksyms` for module versioning and retain generic
 x86-64 hardware support, BORE, BBR3, and ADIOS. Local builds continue to use
-`src/config` as configured above. The workflow uploads artifacts; it does not
-publish a GitHub Release or install the kernel.
+`src/config` as configured above.
 
 # Original archive notice
 
