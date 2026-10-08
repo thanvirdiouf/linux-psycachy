@@ -1,0 +1,3 @@
+{
+  "features": ["handheld", "aufs", "acpi-call"]
+}

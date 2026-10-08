@@ -1,9 +1,14 @@
 # Shared patches and pinned sources
 
 Source releases and SHA-256 checksums live in `src/releases.tsv`. The builder
-derives the kernel series from the requested version and applies its BORE patch,
-then the shared Debian headers patch. Stable releases in the same kernel series
-reuse these files; there is no per-stable-version patch directory.
+uses `releases.json` to select an immutable patch snapshot for each registered
+kernel version. Snapshots are stored under `snapshots/<content-hash>/` and can
+be shared by multiple versions. Each snapshot pins its upstream commit, ordered
+patch checksums, local adaptations, and optional module configuration.
+
+The validated 7.2.9 snapshot preserves the existing BORE and Debian headers fix
+byte-for-byte, with no extra modules. Versions without a snapshot retain the
+legacy series/common patch selection for manual maintenance.
 
 ## Current validated source
 
@@ -25,9 +30,32 @@ Its first hunk is rebased around the `task_ipi_mask` definition added before
 `common/0002-debian-headers-config.patch` rebases PsyCachy's original `config.patch`
 so the Debian headers package contains `.config` for external module builds.
 
-When updating the kernel, pin the new release and checksum in `src/releases.tsv`.
-Reuse the series patches when they still apply; rebase them when necessary.
-A new kernel series needs a matching BORE patch in its own series directory.
-Review the shared headers patch and migrate the configuration through
-`olddefconfig`, then validate compilation and boot behavior. Strict patch checks
-establish that hunks apply, rather than proving runtime compatibility.
+## Patch refresh on new Linux versions
+
+`profile.json` selects the optional extras for future automated updates; its
+default enables `handheld`, `aufs`, and `acpi-call`. BORE and the Debian headers
+fix are always included. These settings do not retrofit older locked releases.
+
+After discovering a newer stable kernel with a CachyOS source archive, the
+updater pins the current `CachyOS/kernel-patches` commit, selects patches from the
+matching kernel series, and verifies each downloaded Git blob. For AUFS it
+selects the newest dated patch matching the series. Only explicitly selected
+patches are applied; other files are listed in the PR for review.
+
+The updater dry-run checks each patch with zero fuzz, then applies it to a fresh
+source extraction in order: BORE, ACPI-call, AUFS, handheld, and Debian headers.
+It carries forward the known `task_ipi_mask` BORE context adjustment only when
+the original hunk and source context match exactly. Other conflicts fail the
+update and require review; patches are not silently omitted.
+
+Successful preparation produces a content-addressed snapshot and an entry in
+`releases.json` tied to the source archive checksum. The builder verifies this
+lock, applies its optional configuration, and checks after `olddefconfig` that
+all selected module settings survived. Configuration changes also invalidate
+prepared-source fingerprints. Do not edit a saved snapshot in place: changing
+its patch files or metadata fails checksum validation.
+
+The automatic trigger remains a newer Linux version in the selected series.
+Patch-only commits and same-version source revisions do not trigger an update
+build. New kernel series still require deliberate adoption and compatibility
+review. Compilation and boot validation remain necessary before publication.

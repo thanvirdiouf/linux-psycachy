@@ -1,12 +1,15 @@
 """Exercise builder control flow with real tar/checksum/patch tools, offline."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import unittest
+
+from scripts import patchsets
 
 
 BUILDER = Path(__file__).resolve().parents[1] / "build.sh"
@@ -42,6 +45,8 @@ class BuilderTests(unittest.TestCase):
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         self.manifest.write_text(f"# Pinned releases\n7.2.9\tcachyos-7.2.9-2\t{digest}\n")
         (self.repo / "build.sh").write_text(BUILDER.read_text())
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/patchsets.py").write_text(Path(patchsets.__file__).read_text())
 
         for directory, name, target in (
             (self.patch_dir, "0001-bore-cachy.patch", "sample.txt"),
@@ -144,6 +149,57 @@ class BuilderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("different or incomplete patches", result.stdout)
         self.assertNotIn("bindeb-pkg", self.log.read_text())
+
+    def pin_snapshot(self, config=None):
+        files = {name: (directory / name).read_bytes() for directory, name in (
+            (self.patch_dir, "0001-bore-cachy.patch"),
+            (self.common_dir, "0002-debian-headers-config.patch"))}
+        metadata = {"upstream_commit": "a" * 40, "features": [], "config": config or {},
+                    "upstream_paths": [], "patches": [
+                        {"name": name, "sha256": hashlib.sha256(content).hexdigest()}
+                        for name, content in files.items()]}
+        identity = patchsets.store_snapshot(self.repo, metadata, files)
+        digest = self.manifest.read_text().splitlines()[-1].split()[2]
+        (self.repo / "src/patches/releases.json").write_text(json.dumps({
+            "7.2.9": {"source_sha256": digest, "snapshot": identity}}))
+        return self.repo / "src/patches/snapshots" / identity
+
+    def test_locked_release_survives_changes_to_shared_series_patch(self):
+        self.pin_snapshot()
+        first = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(first.returncode, 0, first.stdout)
+        bore = self.patch_dir / "0001-bore-cachy.patch"
+        bore.write_text(bore.read_text().replace("+new", "+different"))
+        second = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(second.returncode, 0, second.stdout)
+        self.assertIn("Reusing prepared source", second.stdout)
+        self.assertEqual((self.repo / "src/build-7.2.9/sample.txt").read_text(), "new\n")
+
+    def test_locked_patch_corruption_stops_before_preparation(self):
+        folder = self.pin_snapshot()
+        (folder / "0001-bore-cachy.patch").write_text("corrupt\n")
+        result = self.run_builder("7.2.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum mismatch", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_missing_selected_feature_stops_before_packaging(self):
+        self.pin_snapshot({"ACPI_CALL": "m"})
+        result = self.run_builder("7.2.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CONFIG_ACPI_CALL=m", result.stdout)
+        self.assertNotIn("bindeb-pkg", self.log.read_text())
+
+    def test_snapshot_configuration_change_invalidates_prepared_tree(self):
+        config = self.repo / "src/config"
+        config.write_text(config.read_text() + "CONFIG_ACPI_CALL=m\n")
+        self.pin_snapshot({"ACPI_CALL": "m"})
+        first = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.pin_snapshot({"ACPI_CALL": "y"})
+        second = self.run_builder("7.2.9")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("different or incomplete patches", second.stdout)
 
     def test_single_cpu_build_uses_one_job(self):
         result = self.run_builder("7.2.9", TEST_CPUS="1")

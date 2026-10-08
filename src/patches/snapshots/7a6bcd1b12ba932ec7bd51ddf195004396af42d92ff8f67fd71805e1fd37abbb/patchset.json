@@ -1,0 +1,20 @@
+{
+  "config": {},
+  "features": [],
+  "patches": [
+    {
+      "adaptation": "task_ipi_mask context only",
+      "name": "0001-bore-cachy.patch",
+      "sha256": "4a0bf619cec2107e81620e5fb41b705c882d3bee12b36721c5ab14df3821e30c",
+      "upstream_path": "7.2/sched/0001-bore-cachy.patch"
+    },
+    {
+      "adaptation": null,
+      "name": "0002-debian-headers-config.patch",
+      "sha256": "5845f4fa5270035c4dae90a285125cbf36ad6fbc7d6bf980e2a69ced1777ca8a",
+      "upstream_path": null
+    }
+  ],
+  "upstream_commit": "17bb0bb818d283d0dc6e0280a2e9d5b95e66808b",
+  "upstream_paths": []
+}

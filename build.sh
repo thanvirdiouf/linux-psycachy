@@ -46,6 +46,12 @@ fi
 patch_dir="$repo_dir/src/patches/$kernel_series"
 patches=("$patch_dir/0001-bore-cachy.patch"
     "$repo_dir/src/patches/common/0002-debian-headers-config.patch")
+locked_patches=0
+if [[ -f $repo_dir/src/patches/releases.json ]]; then
+    patch_list=$(python3 "$repo_dir/scripts/patchsets.py" list "$repo_dir" "$version")
+    mapfile -t patches <<< "$patch_list"
+    locked_patches=1
+fi
 for patch_file in "${patches[@]}"; do
     if [[ ! -f $patch_file ]]; then
         echo "Missing patch for kernel series $kernel_series: $patch_file" >&2
@@ -97,6 +103,12 @@ patch_fingerprint=$(
         sha256sum < "$patch_file" | cut -d ' ' -f1
     done | sha256sum | cut -d ' ' -f1
 )
+if [[ $locked_patches == 1 ]]; then
+    config_id=$(python3 "$repo_dir/scripts/patchsets.py" config-id "$repo_dir" "$version")
+    if [[ -n $config_id ]]; then
+        patch_fingerprint=$(printf '%s\n%s\n' "$patch_fingerprint" "$config_id" | sha256sum | cut -d ' ' -f1)
+    fi
+fi
 preparation_id="$source_sha256:$patch_fingerprint"
 if [[ -e $build_dir ]]; then
     # Upgrade the old stamp only when the source and ordered patch contents match.
@@ -140,6 +152,9 @@ fi
 
 cd -- "$build_dir"
 cp -- "$repo_dir/src/config" .config
+if [[ $locked_patches == 1 ]]; then
+    python3 "$repo_dir/scripts/patchsets.py" configure "$repo_dir" "$version" "$build_dir"
+fi
 
 # Ubuntu LTS ships older pahole; BORE itself does not require BTF.
 if [[ $(scripts/pahole-version.sh "${PAHOLE:-pahole}") -lt 126 ]]; then
@@ -148,6 +163,9 @@ if [[ $(scripts/pahole-version.sh "${PAHOLE:-pahole}") -lt 126 ]]; then
         --disable SCHED_CLASS_EXT
 fi
 make CC=gcc olddefconfig
+if [[ $locked_patches == 1 ]]; then
+    python3 "$repo_dir/scripts/patchsets.py" verify-config "$repo_dir" "$version" "$build_dir"
+fi
 for symbol in CACHY SCHED_BORE CC_OPTIMIZE_FOR_PERFORMANCE_O3; do
     if ! grep -qx "CONFIG_$symbol=y" .config; then
         echo "Required configuration option is missing: CONFIG_$symbol" >&2

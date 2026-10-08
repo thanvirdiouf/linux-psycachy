@@ -11,7 +11,7 @@ Build on an **x86_64 Debian/Ubuntu system**:
 
 The builder selects a source release from [src/releases.tsv](src/releases.tsv)
 and verifies its SHA-256. The validated 7.2.9 release uses `cachyos-7.2.9-2`.
-The builder adds BORE 6.8.0 and the Debian headers configuration fix, and builds
+The validated build adds BORE 6.8.0 and the Debian headers configuration fix, and builds
 with GCC. The configuration is migrated from PsyCachy's Debian/Ubuntu config
 and targets generic x86-64 CPUs. Core CachyOS changes, BBR3, and ADIOS are already in
 the source archive. See [source provenance](src/patches/SOURCES.md).
@@ -52,19 +52,26 @@ Builder regression tests: `python3 -m unittest discover -s tests -v`.
 
 ## Reusing patches for new releases
 
-Patches are organized by the kernel series they target:
+Automated releases pin reusable patch snapshots; the original series layout is
+retained for manual releases without a snapshot:
 
 ```text
 src/releases.tsv                         pinned source releases and checksums
+src/patches/profile.json                 optional features for future updates
+src/patches/releases.json                kernel-to-snapshot locks
+src/patches/snapshots/<content-hash>/     reusable patches and configuration
 src/patches/7.2/0001-bore-cachy.patch      BORE for the 7.2 kernel series
 src/patches/common/0002-debian-headers-config.patch
                                         shared Debian packaging fix
 ```
 
-To add a stable release in the same series, add its kernel version, exact CachyOS
+To add a stable release manually in the same series, add its kernel version, exact CachyOS
 release name, and verified archive SHA-256 to `src/releases.tsv`. No new patch
-directory is needed for each stable version: the builder derives `7.2` from
-`7.2.<stable-version>` and reuses the series and common patches.
+directory is needed for each stable version. A version in `releases.json` uses
+its snapshot; a version without a lock derives `7.2` from `7.2.<stable-version>`
+and uses the legacy series and common patches. The updater creates snapshots
+automatically, so use `python3 scripts/update_kernel.py --apply` when registering
+a newly discovered upstream version with refreshed patches and optional extras.
 
 For a different kernel series, supply the matching BORE patch under
 `src/patches/<major.minor>/0001-bore-cachy.patch`, update its provenance, and
@@ -95,6 +102,8 @@ and build metadata. Extract the artifact and run `sha256sum --check SHA256SUMS`
 to verify the packages. Artifacts are retained for 14 days. A separate build-log
 artifact is uploaded on success or failure.
 For another selected version, the artifact name includes that version instead.
+Locked builds also include `PATCHES.json`, recording the exact patch commit,
+checksums, adaptations, and optional module settings used for the build.
 
 To also publish the packages, select **Publish a GitHub Release after a successful
 build** when starting a manual run. After compilation, a separate job downloads
@@ -126,11 +135,16 @@ For a new stable version, the updater:
 
 1. Downloads the exact CachyOS source archive and calculates its SHA-256, checking
    the published asset size and SHA-256 digest when GitHub supplies one.
-2. Adds the pinned release to `src/releases.tsv`, updates `src/default-version`,
-   and records candidate provenance in `src/patches/SOURCES.md`.
-3. Opens a PR from `codex/linux-<version>` to the default branch, preserving older
-   manifest entries and existing patches and configuration.
-4. Calls the package workflow to compile that exact proposed commit and upload
+2. Pins the current `CachyOS/kernel-patches` commit, downloads the selected patches
+   for the same series, verifies their Git blobs, and checks strict application
+   against the new source archive.
+3. Saves an immutable patch snapshot and a source-bound entry in
+   `src/patches/releases.json`, adds the source to `src/releases.tsv`, updates
+   `src/default-version`, and records candidate provenance.
+4. Opens a PR from `codex/linux-<version>` to the default branch, preserving older
+   release entries and their locked patch selections. Other available upstream
+   patches are listed in the PR for review and are not automatically enabled.
+5. Calls the package workflow to compile that exact proposed commit and upload
    packages and diagnostics in the **Check kernel updates** run.
 
 Once these changes are pushed, enable **Settings → Actions → General → Workflow
@@ -138,14 +152,30 @@ permissions → Allow GitHub Actions to create and approve pull requests**.
 The updater uses `GITHUB_TOKEN` and needs no additional secret. It does not
 approve or merge PRs. Repository or organization policies can restrict this
 setting; if PR creation is refused, enable it and rerun the workflow. A branch
-left by a failed PR creation is reused only when its pinned source matches.
+left by a failed PR creation is reused only when its pinned source and patch
+snapshot match; otherwise the workflow requests manual review.
 
 Review the PR and build logs, download and boot-test its packages, then merge it.
 Publish through a manual build with the release checkbox enabled, or attach the
 already tested packages to a release yourself to avoid recompiling. Compilation
 alone does not establish boot or hardware compatibility. Patch failures require
-a manual patch update; a new kernel series requires its own BORE patch before
-switching `src/default-version` to that series.
+a manual patch update; a new kernel series requires a matching source and patch
+selection before switching `src/default-version` to that series.
+
+The default optional profile is:
+
+```json
+{"features": ["handheld", "aufs", "acpi-call"]}
+```
+
+Edit [src/patches/profile.json](src/patches/profile.json) to select any subset for
+future updates. Handheld support enables the selected Steam Deck, ASUS Ally, MSI,
+Zotac, and audio modules; AUFS and ACPI-call are also built as modules. The
+validated Linux 7.2.9 build retains its original patch selection and does not
+acquire these extras retroactively. Alternative schedulers, Clang fixes, NVIDIA
+driver patches, and unknown newly added patches require separate selection and
+review. Profile changes and patch-only upstream commits do not trigger the
+scheduled updater's kernel build; the next eligible Linux version captures them.
 
 Existing open or closed update PRs are skipped, so the daily check does not keep
 rebuilding or reopening the same proposal. To retry a failed build after editing

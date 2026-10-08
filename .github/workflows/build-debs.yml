@@ -33,7 +33,7 @@ on:
       - src/default-version
       - src/patches/**
       - tests/**
-      - scripts/update_kernel.py
+      - scripts/**
       - .github/workflows/build-debs.yml
   pull_request:
     paths:
@@ -43,7 +43,7 @@ on:
       - src/default-version
       - src/patches/**
       - tests/**
-      - scripts/update_kernel.py
+      - scripts/**
       - .github/workflows/build-debs.yml
 
 permissions:
@@ -162,6 +162,13 @@ jobs:
             cp "${metadata[@]}" dist/
           fi
           cp "src/build-$KERNEL_VERSION/.config" dist/kernel.config
+          python3 - "$KERNEL_VERSION" <<'PY'
+          import json, pathlib, shutil, sys
+          from scripts import patchsets
+          folder, metadata = patchsets.load(pathlib.Path.cwd(), sys.argv[1])
+          if metadata:
+              shutil.copyfile(folder / 'patchset.json', 'dist/PATCHES.json')
+          PY
           printf 'Kernel: %s\nCommit: %s\nRun: %s\n' \
             "$KERNEL_VERSION" "$BUILD_COMMIT" "$GITHUB_RUN_ID" > dist/BUILD.txt
           (cd dist && sha256sum ./*.deb > SHA256SUMS)

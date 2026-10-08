@@ -75,12 +75,22 @@ jobs:
             git show FETCH_HEAD:src/releases.tsv > "$RUNNER_TEMP/remote-releases.tsv"
             pinned=$(awk -v version="$KERNEL_VERSION" '$1 == version {print $0}' src/releases.tsv)
             grep -Fx -- "$pinned" "$RUNNER_TEMP/remote-releases.tsv"
+            git show FETCH_HEAD:src/patches/releases.json > "$RUNNER_TEMP/remote-patch-locks.json"
+            python3 - "$KERNEL_VERSION" "$RUNNER_TEMP/remote-patch-locks.json" <<'PY'
+          import json, sys
+          version, remote_file = sys.argv[1:]
+          local = json.load(open('src/patches/releases.json'))
+          remote = json.load(open(remote_file))
+          if local[version] != remote.get(version):
+              raise SystemExit('Existing branch pins a different patch snapshot; review it manually')
+          PY
             commit=$(git rev-parse FETCH_HEAD)
           else
             git switch -c "$UPDATE_BRANCH"
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src/releases.tsv src/default-version src/patches/SOURCES.md
+            git add src/releases.tsv src/default-version src/patches/SOURCES.md \
+              src/patches/releases.json src/patches/snapshots/
             git commit -m "Add Linux $KERNEL_VERSION support"
             git push origin "HEAD:refs/heads/$UPDATE_BRANCH"
             commit=$(git rev-parse HEAD)
