@@ -1,6 +1,6 @@
-# Linux 7.2.9 fork
+# PsyCachy kernel builder
 
-This fork updates the builder for Linux **7.2.9**. The original project was
+This fork currently pins and validates Linux **7.2.9**. The original project was
 archived; its notice and historical documentation are retained below.
 
 Build on an **x86_64 Debian/Ubuntu system**:
@@ -9,11 +9,12 @@ Build on an **x86_64 Debian/Ubuntu system**:
 ./build.sh 7.2.9
 ```
 
-The builder downloads the pinned `cachyos-7.2.9-2` source archive, verifies its
+The builder selects a source release from [src/releases.tsv](src/releases.tsv),
+currently `cachyos-7.2.9-2`, verifies its
 SHA-256, adds BORE 6.8.0 and the Debian headers configuration fix, and builds
 with GCC. The configuration is migrated from PsyCachy's Debian/Ubuntu config
 and targets generic x86-64 CPUs. Core CachyOS changes, BBR3, and ADIOS are already in
-the source archive. See [source provenance](src/patches/7.2.9/SOURCES.md).
+the source archive. See [source provenance](src/patches/SOURCES.md).
 BBR3 is built as the `tcp_bbr3` module, with congestion-control name `bbr3`.
 The migrated configuration uses full preemption with runtime selection enabled;
 Linux 7.2 no longer offers the previous voluntary default in x86 Kconfig.
@@ -31,12 +32,15 @@ To check source preparation without compiling the complete kernel:
 ```
 
 The prepared tree is `src/build-7.2.9`; rerunning the builder reuses it after
-checking its patch fingerprint. Edit `src/config` to customize the configuration.
+checking its patch fingerprint. The fingerprint depends on patch contents and
+order, so reorganizing patch paths does not invalidate a prepared build.
+Existing builds from the previous layout are upgraded when their source and
+patch contents match. Edit `src/config` to customize the configuration.
 Set `JOBS=4 ./build.sh 7.2.9` to limit compilation parallelism. Packages are
 written to `src/`; the builder does not install the resulting kernel.
 
-Only 7.2.9 is supported by this fork. Other versions need matching sources and
-patches. Patch failures stop the build immediately without prompting for files.
+Supported releases are listed in `src/releases.tsv`; currently that is 7.2.9.
+Patch failures stop the build immediately without prompting for files.
 If you previously ran the archived builder, its partially patched
 `src/linux-7.2.9` directory is preserved and is not used by the new builder.
 
@@ -45,10 +49,39 @@ The documentation below describes the archived project, including its separate
 
 Builder regression tests: `python3 -m unittest discover -s tests -v`.
 
+## Reusing patches for new releases
+
+Patches are organized by the kernel series they target:
+
+```text
+src/releases.tsv                         pinned source releases and checksums
+src/patches/7.2/0001-bore-cachy.patch      BORE for the 7.2 kernel series
+src/patches/common/0002-debian-headers-config.patch
+                                        shared Debian packaging fix
+```
+
+To add a stable release in the same series, add its kernel version, exact CachyOS
+release name, and verified archive SHA-256 to `src/releases.tsv`. No new patch
+directory is needed for each stable version: the builder derives `7.2` from
+`7.2.<stable-version>` and reuses the series and common patches.
+
+For a different kernel series, supply the matching BORE patch under
+`src/patches/<major.minor>/0001-bore-cachy.patch`, update its provenance, and
+register the source release. The Debian packaging patch remains shared.
+BORE depends on scheduler internals, so it cannot be assumed to apply to every
+kernel series. Every patch is dry-run checked with zero fuzz before application.
+
+Run `./build.sh <version> --prepare-only`, then compile and test the kernel before
+considering a newly registered release validated. Adding a manifest entry alone
+does not establish compatibility. `src/config` is migrated through `olddefconfig`
+for the selected source; review configuration changes for new kernel series.
+
 ## GitHub Actions packages
 
 The [Build Debian kernel packages](.github/workflows/build-debs.yml) workflow
-validates the builder, then compiles and packages Linux 7.2.9 on Ubuntu 24.04.
+validates the builder, then compiles and packages a pinned release on Ubuntu 24.04.
+The default remains Linux 7.2.9. Manual runs accept a `kernel_version` input,
+which must match an entry in `src/releases.tsv`.
 It runs when build-related files change on `master` or `main`, on pull requests,
 and manually through **Actions → Build Debian kernel packages → Run workflow**.
 The workflow becomes available after these commits are pushed to GitHub.
@@ -59,6 +92,7 @@ libc development `.deb` packages, `SHA256SUMS`, the resolved `kernel.config`,
 and build metadata. Extract the artifact and run `sha256sum --check SHA256SUMS`
 to verify the packages. Artifacts are retained for 14 days. A separate build-log
 artifact is uploaded on success or failure.
+For another selected version, the artifact name includes that version instead.
 
 CI builds omit debug information, BTF, and sched_ext to keep disk usage manageable
 on standard runners. They use `genksyms` for module versioning and retain generic

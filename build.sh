@@ -16,11 +16,42 @@ if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --prepare-only ) ]]; then
 fi
 
 version=$1
-if [[ $version != 7.2.9 ]]; then
-    echo "Unsupported kernel version: $version. This fork supports 7.2.9." >&2
-    echo "Other versions need a matching source release, patches, and configuration." >&2
+if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Invalid kernel version: $version. Use a stable version such as 7.2.9." >&2
     exit 1
 fi
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+kernel_series=${version%.*}
+release_manifest="$repo_dir/src/releases.tsv"
+source_release=
+source_sha256=
+while read -r release_version release_name release_hash extra || [[ -n $release_version ]]; do
+    [[ $release_version == "$version" ]] || continue
+    if [[ -n $source_release ]]; then
+        echo "Duplicate kernel version in $release_manifest: $version" >&2
+        exit 1
+    fi
+    source_prefix="cachyos-$version-"
+    if [[ $release_name != "$source_prefix"* || ! ${release_name#"$source_prefix"} =~ ^[0-9]+$ || ! $release_hash =~ ^[a-f0-9]{64}$ || -n $extra ]]; then
+        echo "Invalid source release entry for $version in $release_manifest." >&2
+        exit 1
+    fi
+    source_release=$release_name
+    source_sha256=$release_hash
+done < "$release_manifest"
+if [[ -z $source_release ]]; then
+    echo "Unsupported kernel version: $version. No pinned source release in $release_manifest." >&2
+    exit 1
+fi
+patch_dir="$repo_dir/src/patches/$kernel_series"
+patches=("$patch_dir/0001-bore-cachy.patch"
+    "$repo_dir/src/patches/common/0002-debian-headers-config.patch")
+for patch_file in "${patches[@]}"; do
+    if [[ ! -f $patch_file ]]; then
+        echo "Missing patch for kernel series $kernel_series: $patch_file" >&2
+        exit 1
+    fi
+done
 if [[ $(uname -m) != x86_64 ]]; then
     echo "The bundled configuration requires an x86_64 build host." >&2
     exit 1
@@ -32,13 +63,8 @@ if [[ ! $jobs =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source_release=cachyos-7.2.9-2
-source_sha256=2da9e6ffe31436657f46909db059059946dac22c2ac6cde05e49a66d61acfcba
 archive="$repo_dir/src/$source_release.tar.gz"
 build_dir="$repo_dir/src/build-$version"
-patch_dir="$repo_dir/src/patches/$version"
-patches=("$patch_dir/0001-bore-cachy.patch" "$patch_dir/0002-debian-headers-config.patch")
 staging_dir=
 trap 'echo "Build failed at line $LINENO." >&2' ERR
 trap 'if [[ -n $staging_dir ]]; then rm -rf -- "$staging_dir"; fi' EXIT
@@ -66,9 +92,24 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 
 # A completed preparation can be reused after an interrupted compilation.
-patch_fingerprint=$(sha256sum "${patches[@]}" | sha256sum | cut -d ' ' -f1)
+patch_fingerprint=$(
+    for patch_file in "${patches[@]}"; do
+        sha256sum < "$patch_file" | cut -d ' ' -f1
+    done | sha256sum | cut -d ' ' -f1
+)
 preparation_id="$source_sha256:$patch_fingerprint"
 if [[ -e $build_dir ]]; then
+    # Upgrade the old stamp only when the source and ordered patch contents match.
+    legacy_fingerprint=$(
+        for patch_file in "${patches[@]}"; do
+            digest=$(sha256sum "$patch_file")
+            printf '%s  %s/src/patches/%s/%s\n' "${digest%% *}" "$repo_dir" "$version" "${patch_file##*/}"
+        done | sha256sum | cut -d ' ' -f1
+    )
+    if [[ -f $build_dir/.psycachy-prepared && $(<"$build_dir/.psycachy-prepared") == "$source_sha256:$legacy_fingerprint" ]]; then
+        printf '%s\n' "$preparation_id" > "$build_dir/.psycachy-prepared"
+        echo "Updated prepared-source fingerprint for the shared patch layout."
+    fi
     if [[ ! -f $build_dir/.psycachy-prepared || $(<"$build_dir/.psycachy-prepared") != "$preparation_id" ]]; then
         echo "Existing build tree has different or incomplete patches: $build_dir" >&2
         echo "Move it aside and rerun the builder to prepare a fresh tree." >&2

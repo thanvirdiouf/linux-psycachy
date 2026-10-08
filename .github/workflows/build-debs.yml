@@ -2,11 +2,18 @@ name: Build Debian kernel packages
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: Stable kernel version pinned in src/releases.tsv
+        required: true
+        default: '7.2.9'
+        type: string
   push:
     branches: [master, main]
     paths:
       - build.sh
       - src/config
+      - src/releases.tsv
       - src/patches/**
       - tests/**
       - .github/workflows/build-debs.yml
@@ -14,6 +21,7 @@ on:
     paths:
       - build.sh
       - src/config
+      - src/releases.tsv
       - src/patches/**
       - tests/**
       - .github/workflows/build-debs.yml
@@ -26,7 +34,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KERNEL_VERSION: '7.2.9'
+  KERNEL_VERSION: ${{ inputs.kernel_version || '7.2.9' }}
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:

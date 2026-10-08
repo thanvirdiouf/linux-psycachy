@@ -1,0 +1,3 @@
+# Kernel version   CachyOS source release   Archive SHA-256
+# Add verified releases here; patches are selected by major.minor kernel series.
+7.2.9	cachyos-7.2.9-2	2da9e6ffe31436657f46909db059059946dac22c2ac6cde05e49a66d61acfcba

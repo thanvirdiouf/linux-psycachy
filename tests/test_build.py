@@ -19,8 +19,11 @@ class BuilderTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "fork with spaces"
         src = self.repo / "src"
-        self.patch_dir = src / "patches" / "7.2.9"
+        self.patch_dir = src / "patches" / "7.2"
         self.patch_dir.mkdir(parents=True)
+        self.common_dir = src / "patches" / "common"
+        self.common_dir.mkdir()
+        self.manifest = src / "releases.tsv"
         (src / "config").write_text(
             "CONFIG_CACHY=y\nCONFIG_SCHED_BORE=y\n"
             "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y\n"
@@ -37,15 +40,14 @@ class BuilderTests(unittest.TestCase):
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(tree, arcname="cachyos-7.2.9-2")
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        script = BUILDER.read_text()
-        checksum_line = next(line for line in script.splitlines() if line.startswith("source_sha256="))
-        (self.repo / "build.sh").write_text(script.replace(checksum_line, f"source_sha256={digest}"))
+        self.manifest.write_text(f"# Pinned releases\n7.2.9\tcachyos-7.2.9-2\t{digest}\n")
+        (self.repo / "build.sh").write_text(BUILDER.read_text())
 
-        for name, target in (
-            ("0001-bore-cachy.patch", "sample.txt"),
-            ("0002-debian-headers-config.patch", "headers.txt"),
+        for directory, name, target in (
+            (self.patch_dir, "0001-bore-cachy.patch", "sample.txt"),
+            (self.common_dir, "0002-debian-headers-config.patch", "headers.txt"),
         ):
-            (self.patch_dir / name).write_text(
+            (directory / name).write_text(
                 f"--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n"
             )
 
@@ -59,7 +61,7 @@ class BuilderTests(unittest.TestCase):
             binaries / "make",
             'echo "$*" >> "$BUILD_LOG"\n'
             'if [[ -n ${FAIL_TARGET:-} && " $* " == *" $FAIL_TARGET "* ]]; then exit 2; fi\n'
-            'if [[ " $* " == *" kernelversion "* ]]; then echo 7.2.9; fi',
+            'if [[ " $* " == *" kernelversion "* ]]; then echo "${TEST_KERNEL_VERSION:-7.2.9}"; fi',
         )
         self.log = self.root / "make.log"
         self.config_log = self.root / "config.log"
@@ -82,11 +84,11 @@ class BuilderTests(unittest.TestCase):
         )
 
     def test_rejects_unsupported_version_before_any_work(self):
-        result = self.run_builder("7.3")
+        result = self.run_builder("7.3.0")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Unsupported kernel version", result.stdout)
         self.assertFalse(self.log.exists())
-        self.assertFalse((self.repo / "src" / "build-7.3").exists())
+        self.assertFalse((self.repo / "src" / "build-7.3.0").exists())
 
     def test_rejects_invalid_jobs_before_preparation(self):
         result = self.run_builder("7.2.9", JOBS="0")
@@ -113,7 +115,7 @@ class BuilderTests(unittest.TestCase):
         self.assertNotIn("bindeb-pkg", self.log.read_text())
 
     def test_patch_failure_stops_and_cleans_staging(self):
-        patch = self.patch_dir / "0002-debian-headers-config.patch"
+        patch = self.common_dir / "0002-debian-headers-config.patch"
         patch.write_text(patch.read_text().replace("-old", "-missing"))
         result = self.run_builder("7.2.9")
         self.assertNotEqual(result.returncode, 0)
@@ -168,6 +170,85 @@ class BuilderTests(unittest.TestCase):
         result = self.run_builder("7.2.9", "--prepare-only", INSTALL_DEPS="0")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("using supplied tools", result.stdout)
+
+    def test_another_stable_release_reuses_series_and_common_patches(self):
+        src = self.repo / "src"
+        release = "cachyos-7.2.10-1"
+        archive = src / f"{release}.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(self.root / "source", arcname=release)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        with self.manifest.open("a") as stream:
+            stream.write(f"7.2.10\t{release}\t{digest}\n")
+        result = self.run_builder("7.2.10", "--prepare-only", TEST_KERNEL_VERSION="7.2.10")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        tree = src / "build-7.2.10"
+        self.assertEqual((tree / "sample.txt").read_text(), "new\n")
+        self.assertEqual((tree / "headers.txt").read_text(), "new\n")
+        self.assertFalse((src / "patches" / "7.2.10").exists())
+
+    def test_pinned_series_without_bore_patch_is_rejected(self):
+        digest = "a" * 64
+        self.manifest.write_text(f"7.3.0\tcachyos-7.3.0-1\t{digest}\n")
+        result = self.run_builder("7.3.0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing patch for kernel series 7.3", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_invalid_release_metadata_is_rejected(self):
+        for release, digest in (("cachyos-7.2.10-1", "a" * 64),
+                                ("cachyos-7x2x9-2", "a" * 64),
+                                ("cachyos-7.2.9-2", "bad-checksum")):
+            with self.subTest(release=release, digest=digest):
+                self.manifest.write_text(f"7.2.9\t{release}\t{digest}\n")
+                result = self.run_builder("7.2.9")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Invalid source release entry", result.stdout)
+                self.assertFalse(self.log.exists())
+
+    def test_duplicate_release_is_rejected(self):
+        self.manifest.write_text(self.manifest.read_text() * 2)
+        result = self.run_builder("7.2.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Duplicate kernel version", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_legacy_prepared_tree_survives_patch_move(self):
+        result = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        tree = self.repo / "src" / "build-7.2.9"
+        stamp = tree / ".psycachy-prepared"
+        source_digest = stamp.read_text().split(":")[0]
+        legacy_lines = "".join(
+            f"{hashlib.sha256(patch.read_bytes()).hexdigest()}  "
+            f"{self.repo}/src/patches/7.2.9/{patch.name}\n"
+            for patch in (self.patch_dir / "0001-bore-cachy.patch",
+                          self.common_dir / "0002-debian-headers-config.patch")
+        )
+        legacy_hash = hashlib.sha256(legacy_lines.encode()).hexdigest()
+        stamp.write_text(f"{source_digest}:{legacy_hash}\n")
+        marker = tree / "existing-object.o"
+        marker.write_text("Preserve compiled objects")
+        result = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Updated prepared-source fingerprint", result.stdout)
+        self.assertEqual(marker.read_text(), "Preserve compiled objects")
+        self.assertNotIn(legacy_hash, stamp.read_text())
+
+    def test_prepared_tree_survives_repository_move(self):
+        result = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        relocated = self.root / "relocated fork"
+        self.repo.rename(relocated)
+        self.repo = relocated
+        result = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Reusing prepared source", result.stdout)
+
+    def test_manifest_without_final_newline_is_accepted(self):
+        self.manifest.write_text(self.manifest.read_text().rstrip("\n"))
+        result = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 if __name__ == "__main__":
