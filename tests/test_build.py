@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Exercise builder control flow with real tar/checksum/patch tools, offline."""
 
 import hashlib

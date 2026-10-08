@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Exercise pinned patch snapshots with real offline tar and patch tools."""
 
 import hashlib

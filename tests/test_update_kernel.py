@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Check release selection, archive verification, and proposed edits offline."""
 
 import hashlib

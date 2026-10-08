@@ -1,279 +1,232 @@
-# PsyCachy kernel builder
+# PsyCachy Linux
 
-This fork currently pins and validates Linux **7.2.9**. The original project was
-archived; its notice and historical documentation are retained below.
+Build CachyOS-based Linux kernels for **Debian and Ubuntu**, with generic
+**x86-64** support, GCC compilation, and Debian packages ready to install.
+PsyCachy combines BORE scheduling with the CachyOS source tree's BBR3 congestion
+control and ADIOS I/O scheduler. GitHub Actions handles package builds and
+proposes updates when a newer supported stable kernel becomes available.
 
-Build on an **x86_64 Debian/Ubuntu system**:
+Linux **7.2.9** has been compiled, installed, and boot-tested. The default
+version is recorded in [src/default-version](src/default-version), and all
+registered versions are listed in [src/releases.tsv](src/releases.tsv).
+
+## Features
+
+- GCC builds for generic x86-64 hardware, without CPU-specific build variants.
+- BORE scheduling, BBR3 as the `tcp_bbr3` module, and ADIOS from the CachyOS source.
+- Kernel image, headers, and libc development `.deb` packages.
+- Verified source archives and immutable patch snapshots for registered builds.
+- GitHub Actions builds, downloadable artifacts, and optional release publication.
+- Automated update PRs with refreshed patches and configurable optional modules.
+
+Future automated updates enable handheld support, AUFS, and ACPI-call by default.
+These choices are configured in [src/patches/profile.json](src/patches/profile.json).
+Older locked versions keep their existing patch selection; the validated 7.2.9
+build does not include these extras.
+
+## Download and install
+
+Published packages are available under [Releases](https://github.com/thanvirdiouf/linux-psycachy/releases).
+Successful workflow runs also provide packages under
+[Actions](https://github.com/thanvirdiouf/linux-psycachy/actions).
+
+Download the image, headers, and libc development packages for the same build,
+along with `SHA256SUMS`. If downloading an Actions artifact, extract it first.
+In a directory containing only that build's packages, run:
 
 ```sh
+sha256sum --check SHA256SUMS
+sudo apt install ./*.deb
+```
+
+Reboot and select the installed kernel from your boot menu. Keep a working kernel
+available while testing a new build. Compilation alone does not establish boot,
+hardware, or DKMS compatibility.
+
+## Build locally
+
+Use an **x86_64 Debian/Ubuntu build host** with Python 3 and enough disk space
+for the kernel source, compilation, and packages.
+
+```sh
+git clone https://github.com/thanvirdiouf/linux-psycachy.git
+cd linux-psycachy
 ./build.sh 7.2.9
 ```
 
-The builder selects a source release from [src/releases.tsv](src/releases.tsv)
-and verifies its SHA-256. The validated 7.2.9 release uses `cachyos-7.2.9-2`.
-The validated build adds BORE 6.8.0 and the Debian headers configuration fix, and builds
-with GCC. The configuration is migrated from PsyCachy's Debian/Ubuntu config
-and targets generic x86-64 CPUs. Core CachyOS changes, BBR3, and ADIOS are already in
-the source archive. See [source provenance](src/patches/SOURCES.md).
-BBR3 is built as the `tcp_bbr3` module, with congestion-control name `bbr3`.
-The migrated configuration uses full preemption with runtime selection enabled;
-Linux 7.2 no longer offers the previous voluntary default in x86 Kconfig.
+Replace `7.2.9` with a version registered in `src/releases.tsv`. The builder
+verifies the pinned source archive, checks the selected patches, migrates
+[src/config](src/config) through `olddefconfig`, and writes packages to `src/`.
+It does not install the resulting kernel.
 
 Missing build and packaging dependencies are installed through `sudo apt-get`.
-Set `INSTALL_DEPS=0` to use a toolchain you have supplied yourself.
-If `pahole` 1.26 or newer is unavailable, the builder disables BTF and sched_ext;
-BORE still works, but BTF-dependent BPF programs need a newer `pahole` build.
-To enable BTF, install `pahole` >= 1.26 before running the builder.
+Set `INSTALL_DEPS=0` to use tools you have supplied yourself.
 
-To check source preparation without compiling the complete kernel:
+To prepare sources without compiling the complete kernel:
 
 ```sh
 ./build.sh 7.2.9 --prepare-only
 ```
 
-The prepared tree is `src/build-7.2.9`; rerunning the builder reuses it after
-checking its patch fingerprint. The fingerprint depends on patch contents and
-order, so reorganizing patch paths does not invalidate a prepared build.
-Existing builds from the previous layout are upgraded when their source and
-patch contents match. Edit `src/config` to customize the configuration.
-Set `JOBS=4 ./build.sh 7.2.9` to limit compilation parallelism. Packages are
-written to `src/`; the builder does not install the resulting kernel.
+To limit compilation parallelism:
 
-Registered releases are listed in `src/releases.tsv`. Linux 7.2.9 has been
-compiled, installed, and boot-tested; automated update candidates need review.
-Patch failures stop the build immediately without prompting for files.
-If you previously ran the archived builder, its partially patched
-`src/linux-7.2.9` directory is preserved and is not used by the new builder.
-
-The documentation below describes the archived project, including its separate
-`proto` branch builder; it does not describe this fork's `build.sh`.
-
-Builder regression tests: `python3 -m unittest discover -s tests -v`.
-
-## Reusing patches for new releases
-
-Automated releases pin reusable patch snapshots; the original series layout is
-retained for manual releases without a snapshot:
-
-```text
-src/releases.tsv                         pinned source releases and checksums
-src/patches/profile.json                 optional features for future updates
-src/patches/releases.json                kernel-to-snapshot locks
-src/patches/snapshots/<content-hash>/     reusable patches and configuration
-src/patches/7.2/0001-bore-cachy.patch      BORE for the 7.2 kernel series
-src/patches/common/0002-debian-headers-config.patch
-                                        shared Debian packaging fix
+```sh
+JOBS=4 ./build.sh 7.2.9
 ```
 
-To add a stable release manually in the same series, add its kernel version, exact CachyOS
-release name, and verified archive SHA-256 to `src/releases.tsv`. No new patch
-directory is needed for each stable version. A version in `releases.json` uses
-its snapshot; a version without a lock derives `7.2` from `7.2.<stable-version>`
-and uses the legacy series and common patches. The updater creates snapshots
-automatically, so use `python3 scripts/update_kernel.py --apply` when registering
-a newly discovered upstream version with refreshed patches and optional extras.
+Prepared sources live in `src/build-<version>`. Subsequent runs reuse that tree
+when its source and patch fingerprints match. Patch order, patch contents, and
+optional configuration changes are included in this check; moving patch files
+alone does not invalidate a prepared build.
 
-For a different kernel series, supply the matching BORE patch under
-`src/patches/<major.minor>/0001-bore-cachy.patch`, update its provenance, and
-register the source release. The Debian packaging patch remains shared.
-BORE depends on scheduler internals, so it cannot be assumed to apply to every
-kernel series. Every patch is dry-run checked with zero fuzz before application.
+Edit `src/config` to customize local builds. With `pahole` older than 1.26, the
+builder disables BTF and sched_ext. Install `pahole` 1.26 or newer before building
+if you need BTF-dependent BPF programs.
 
-Run `./build.sh <version> --prepare-only`, then compile and test the kernel before
-considering a newly registered release validated. Adding a manifest entry alone
-does not establish compatibility. `src/config` is migrated through `olddefconfig`
-for the selected source; review configuration changes for new kernel series.
-
-## GitHub Actions packages
+## GitHub Actions
 
 The [Build Debian kernel packages](.github/workflows/build-debs.yml) workflow
-validates the builder, then compiles and packages a pinned release on Ubuntu 24.04.
-The default version is stored in [src/default-version](src/default-version).
-Manual runs accept a `kernel_version` input, which must match an entry in
-`src/releases.tsv`; leave it blank to build the default version.
-It runs when build-related files change on `master` or `main`, on pull requests,
-and manually through **Actions → Build Debian kernel packages → Run workflow**.
-The workflow becomes available after these commits are pushed to GitHub.
+runs regression tests, builds the kernel on Ubuntu 24.04, verifies the Debian
+packages, and uploads artifacts. It runs for build-related pushes to `master`
+or `main`, pull requests, and manual runs.
 
-After a successful run, open its **Artifacts** section and download
-`psycachy-7.2.9-amd64-<run-id>-<attempt>`. It contains the image, headers, and
-libc development `.deb` packages, `SHA256SUMS`, the resolved `kernel.config`,
-and build metadata. Extract the artifact and run `sha256sum --check SHA256SUMS`
-to verify the packages. Artifacts are retained for 14 days. A separate build-log
-artifact is uploaded on success or failure.
-For another selected version, the artifact name includes that version instead.
-Locked builds also include `PATCHES.json`, recording the exact patch commit,
-checksums, adaptations, and optional module settings used for the build.
+For a manual build, open **Actions → Build Debian kernel packages → Run workflow**.
+Leave the kernel version blank to use `src/default-version`, or enter a registered
+version.
 
-To also publish the packages, select **Publish a GitHub Release after a successful
-build** when starting a manual run. After compilation, a separate job downloads
-the build artifact, verifies its package checksums, and publishes all its files
-as release assets, including the individual `.deb` files. Release notes link to
-the source commit and workflow run.
+The package artifact is named
+`psycachy-<version>-amd64-<run-id>-<attempt>` and contains:
 
-The release tag is `psycachy-<version>-build-<run-number>-<attempt>` and points to
-the commit used for the build. Each run attempt gets a distinct tag, so repeated
-builds do not overwrite existing releases. Release assets remain available after
-the 14-day Actions artifact retention period. Push and pull-request builds only
-upload artifacts. Publication uses the built-in `GITHUB_TOKEN`; only the release
-job receives `contents: write`, and no additional secret is needed.
+- The image, headers, and libc development `.deb` packages and `SHA256SUMS`.
+- The resolved `kernel.config` and build metadata.
+- `PATCHES.json` for locked builds, with patch provenance and configuration.
 
-CI builds omit debug information, BTF, and sched_ext to keep disk usage manageable
-on standard runners. They use `genksyms` for module versioning and retain generic
-x86-64 hardware support, BORE, BBR3, and ADIOS. Local builds continue to use
-`src/config` as configured above.
+Artifacts are retained for **14 days**. A separate diagnostic artifact contains
+the build log and configuration, including when compilation fails.
 
-## Automated kernel updates
+CI builds omit debug information, BTF, and sched_ext to fit standard runners.
+They retain generic x86-64 support and use `genksyms` for module versioning.
+Local builds use `src/config` with the builder's compatibility adjustments.
 
-The [Check kernel updates](.github/workflows/update-kernel.yml) workflow checks
-CachyOS releases daily at 03:23 UTC (08:53 India time), or when run manually.
-It follows the series of `src/default-version`: with `7.2.9` selected, it looks
-for newer `7.2.x` releases. It skips release candidates, other series, and source
-revisions of an already registered kernel version.
+### Publish a release
 
-For a new stable version, the updater:
+On a manual run, check **Publish a GitHub Release after a successful build**.
+The release job downloads that run's artifact, verifies its checksums, and
+publishes the packages and metadata as release assets.
 
-1. Downloads the exact CachyOS source archive and calculates its SHA-256, checking
-   the published asset size and SHA-256 digest when GitHub supplies one.
-2. Pins the current `CachyOS/kernel-patches` commit, downloads the selected patches
-   for the same series, verifies their Git blobs, and checks strict application
-   against the new source archive.
-3. Saves an immutable patch snapshot and a source-bound entry in
-   `src/patches/releases.json`, adds the source to `src/releases.tsv`, updates
-   `src/default-version`, and records candidate provenance.
-4. Opens a PR from `codex/linux-<version>` to the default branch, preserving older
-   release entries and their locked patch selections. Other available upstream
-   patches are listed in the PR for review and are not automatically enabled.
-5. Calls the package workflow to compile that exact proposed commit and upload
-   packages and diagnostics in the **Check kernel updates** run.
+Release tags use `psycachy-<version>-build-<run-number>-<attempt>` and point to the
+built commit. Release assets remain available after Actions artifacts expire.
+Publication uses `GITHUB_TOKEN`; no additional secret is required.
 
-Once these changes are pushed, enable **Settings → Actions → General → Workflow
-permissions → Allow GitHub Actions to create and approve pull requests**.
-The updater uses `GITHUB_TOKEN` and needs no additional secret. It does not
-approve or merge PRs. Repository or organization policies can restrict this
-setting; if PR creation is refused, enable it and rerun the workflow. A branch
-left by a failed PR creation is reused only when its pinned source and patch
-snapshot match; otherwise the workflow requests manual review.
+**Push, pull-request, and automated update builds upload artifacts without
+publishing releases.** To publish an already completed build without recompiling,
+download its artifact and attach the files to a release manually.
 
-Review the PR and build logs, download and boot-test its packages, then merge it.
-Publish through a manual build with the release checkbox enabled, or attach the
-already tested packages to a release yourself to avoid recompiling. Compilation
-alone does not establish boot or hardware compatibility. Patch failures require
-a manual patch update; a new kernel series requires a matching source and patch
-selection before switching `src/default-version` to that series.
+## Automated updates
 
-The default optional profile is:
+The [Check kernel updates](.github/workflows/update-kernel.yml) workflow runs daily
+at **03:23 UTC / 08:53 IST**, and can also be started manually. It follows the
+kernel series in `src/default-version`: a default of `7.2.9` selects newer
+`7.2.x` versions with matching CachyOS source releases.
+
+For a new eligible version, the updater:
+
+1. Downloads and verifies the exact CachyOS source archive.
+2. Pins the current `CachyOS/kernel-patches` commit and downloads the selected
+   patches for the same kernel series, verifying their Git blobs.
+3. Checks patch application with zero fuzz, saves an immutable snapshot, and
+   records the source, checksum, patch lock, and new default version.
+4. Opens a `codex/linux-<version>` PR and builds its exact commit.
+
+BORE and the Debian headers configuration fix are always included. Optional
+features are selected through `src/patches/profile.json`:
 
 ```json
 {"features": ["handheld", "aufs", "acpi-call"]}
 ```
 
-Edit [src/patches/profile.json](src/patches/profile.json) to select any subset for
-future updates. Handheld support enables the selected Steam Deck, ASUS Ally, MSI,
-Zotac, and audio modules; AUFS and ACPI-call are also built as modules. The
-validated Linux 7.2.9 build retains its original patch selection and does not
-acquire these extras retroactively. Alternative schedulers, Clang fixes, NVIDIA
-driver patches, and unknown newly added patches require separate selection and
-review. Profile changes and patch-only upstream commits do not trigger the
-scheduled updater's kernel build; the next eligible Linux version captures them.
+Use any subset of these features for future updates. Handheld support enables
+selected Steam Deck, ASUS Ally, MSI, Zotac, and audio modules. AUFS and ACPI-call
+are also built as modules. Other upstream patches are listed in the update PR
+for review and are not applied automatically.
 
-Existing open or closed update PRs are skipped, so the daily check does not keep
-rebuilding or reopening the same proposal. To retry a failed build after editing
-the branch, run **Build Debian kernel packages** manually on that branch and
-select its candidate kernel version. The updater proposes the newest eligible
-version each time; review any older pending update PRs when a newer one appears.
+Patch-only upstream commits, same-version CachyOS source revisions, and release
+candidates do not trigger update builds. A new kernel series requires deliberate
+adoption. Existing open or closed update PRs are skipped to avoid repeated builds.
+Patch conflicts stop the update for review; selected patches are never silently
+omitted.
 
-For a local discovery check without changing files or downloading the archive:
+Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
+Actions to create and approve pull requests**. The updater grants its job the
+required write permissions, but does not approve or merge PRs.
+
+Review the PR, build logs, and resolved configuration. Download and boot-test the
+packages before merging. To retry a build after editing an update branch, run
+**Build Debian kernel packages** manually on that branch with its candidate version.
+Release publication remains a separate manual step.
+
+## Maintenance and contribution
+
+| File or directory | Purpose |
+| --- | --- |
+| `src/releases.tsv` | Pinned source releases and archive checksums |
+| `src/default-version` | Default CI version and updater's selected kernel series |
+| `src/config` | Base kernel configuration |
+| `src/patches/profile.json` | Optional features for future automated updates |
+| `src/patches/releases.json` | Source-bound kernel-to-snapshot locks |
+| `src/patches/snapshots/` | Immutable, reusable patches and configuration |
+| `src/patches/<series>/` and `src/patches/common/` | Fallback patches for manually registered versions without locks |
+
+To discover an update locally without modifying files or downloading its archive:
 
 ```sh
 python3 scripts/update_kernel.py
 ```
 
-To register a discovered candidate locally, run the script with `--apply`, inspect
-the resulting diff, then run `./build.sh <version> --prepare-only` and the tests.
-For manual updates, maintain both `src/releases.tsv` and `src/default-version`;
-workflow YAML no longer needs a version edit.
+To register the discovered candidate with refreshed patches:
 
-# Original archive notice
+```sh
+python3 scripts/update_kernel.py --apply
+```
 
-As of June 9th, 2026, this project has been archived as I no longer have the time to commit to it as my focus has been on LinuxToys. Feel free to fork it if you wish to continue it, and I'll be happy to help in any way I can. Below this message is the old readme.
+Inspect the resulting diff, prepare the candidate source, run the regression
+tests, and compile and boot-test the packages before treating the version as
+validated:
 
-# PsyCachy Kernel
-This repository contains the releases of the `linux-psycachy` kernel, and the script for building that and custom variants. The script may automate the process of configuring and optimizing the kernel build according to your hardware and preferences.
+```sh
+./build.sh <version> --prepare-only
+python3 -m unittest discover -s tests -v
+./build.sh <version>
+```
 
-# What's this about?
-PsyCachy is a kernel with improved settings for compatibility and stability across Debian/Ubuntu Linux distributions derived from linux-cachyos. Releases are made targeting Ubuntu rolling and LTS with *dkms* module compatibility, since it's the most widely used version, but you are free to build it for other kernel versions and distributions for yourself like Debian using the `proto` branch.
-### Differences to `linux-cachyos`
-- Built with `gcc`, as `clang` caused too many inconsistencies due to `llvm` bugs.
-- Doesn't include processor architecture-specific optimizations, as they bring too small gains to justify the time compiling them or the confusion caused to newcomers by multiple kernel versions on release - you can include those by building the kernel yourself running `cachyos-deb.sh` with `-b` option if you wish.
-- Doesn't include handheld console drivers, as there isn't much of a point on doing it for Debian/Ubuntu.
-- ~~OS/-o2 optimization instead of -o3, which caused quite a few problems with Debian/Ubuntu packages.~~ Now it builds -o3 by default, fixed.
+Do not edit saved snapshots in place: their metadata and patch checksums are
+verified. Profile changes affect future updates, while older releases keep their
+locked snapshots. See [source and patch provenance](src/patches/SOURCES.md) for
+upstream details and the known BORE context adjustment.
 
-# Recommended usage (for most people)
-Install the kernel image of your choice from [Releases](https://github.com/psygreg/linux-psycachy/releases) or through [LinuxToys](https://github.com/psygreg/linuxtoys). 
-
-## Manual installation
-- Download **all three** .deb packages
-- Open terminal in the same directory of the packages
-- `sudo dpkg -i linux-image-psycachy_6.14.11-1_amd64.deb linux-headers-psycachy_6.14.11-1_amd64.deb linux-libc-dev_6.14.11-1_amd64.deb`, replacing 6.14.11 with your package version
-- To install CachyOS SystemD configuration files as well to maximize effectiveness, download and run `cachyconfs.sh` available from *Releases* or [LinuxToys](https://git.linux.toys/psygreg/linuxtoys).
-
-## Secure Boot
-You can make the kernel compatible with Secure Boot by signing it using `create-key.sh` available from *Releases*. Remember to store the password you set when the keypair is created carefully as it will be required to import the MOK into BIOS.
-
-# Building
-## Prerequisites
-Before running the script, ensure you have the following prerequisites installed:
-
-- `libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf llvm gcc rustc`: for compiling the kernel.
-- `whiptail`: For displaying dialog boxes in the script.
-- `curl`: For fetching the latest kernel version.
-- `devscripts` and `debhelper`: For packaging.
-
-You can install these dependencies using your distribution's package manager, or have the build scripts install them for you. It is advisable to use *Ubuntu LTS* or *Debian Stable* for building to ensure better compatibility. You can use a `docker`, `podman` or `distrobox` container for that.
-
-## Features
-The builder in `proto` offers a variety of configuration options:
-
-- Auto-detection of CPU architecture for optimization.
-- Selection of CachyOS specific optimizations.
-- Configuration of CPU scheduler, LLVM LTO, tick rate, and more.
-- Support for various kernel configurations such as NUMA, NR_CPUS, Hugepages, and LRU.
-- Application of O3 optimization and performance governor settings.
-
-## Usage
-To use the script to build your own kernel, follow these steps:
-
-1. Clone the repository to your local machine.
-2. Make the script executable with `chmod +x cachyos-deb.sh`.
-3. Run the script with `./cachyos-deb.sh`.
-4. Follow the on-screen prompts to select your desired kernel version and configurations, for:
-   - Choose the kernel version.
-   - Enable or disable CachyOS optimizations.
-   - Configure the CPU scheduler, LLVM LTO, tick rate, NR_CPUS, Hugepages, LRU, and other system optimizations. You may want to check the [Advanced Configurations](#advanced-configurations) section for more details on these options.
-   - Select the preempt type and tick type for further system tuning.
-5. Compile and install.
-
-### Launch options (for `cachyos-deb.sh` on `proto` branch)
-- `-b`: builds a `psycachy`-variant kernel with optimizations specific to your CPU `MARCH`. 
-- `-g`: builds a `psycachy` generic image from the latest kernel upstream release.
-- `-l`: builds a `psycachy-lts` generic image from the latest LTS kernel upstream release.
-
-## Advanced Configurations
-The script includes advanced configuration options for users who want to fine-tune their kernel:
-
-- **CachyOS Configuration**: Enable all optimizations from CachyOS. A kernel with this option enabled is not guaranteed to work.
-- **CPU Scheduler**: Choose between different schedulers like Cachy, PDS, or none.
-- **Tick Rate**: Configure the kernel tick rate according to your system's needs.
-- **NR_CPUS**: Set the maximum number of CPUs/cores the kernel will support.
-- **Hugepages**: Enable or disable Hugepages support.
-- **LRU**: Configure the Least Recently Used memory management mechanism.
-- **O3 Optimization**: Apply O3 optimization for performance improvement.
-- **Performance Governor**: Set the CPU frequency scaling governor to performance.
-- **Modprobed.db**: will use the database built from `modprobed.db` to only build drivers specific to your machine. **WARNING:** use the default kernel with `modprobed.db` up and running for at least a week before building with this option to make sure all drivers you need are on the database, and **always** keep a default (or `psycachy` generic package) kernel as a backup!
-
-## Contributing
-Contributions are welcome! If you have suggestions for improving the script or adding new features, please open an issue or submit a pull request.
+Issues and pull requests are welcome. Include the kernel version, build log,
+resolved configuration, and relevant hardware details when reporting a problem.
 
 ## License
-This project is licensed under the MIT License as upstream - see the LICENSE file for details.
+
+Project contributions to the builder, updater, tests, workflows, and documentation
+are licensed under the **GNU General Public License version 2 only**
+(`GPL-2.0-only`). See [LICENSE](LICENSE) for the full text.
+
+Inherited MIT-licensed material retains its MIT terms and attribution. Linux
+kernel sources, kernel-derived patches, and other third-party material retain
+their applicable upstream licenses; this project's license does not replace
+them. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the licensing scope
+and upstream acknowledgements.
+
+When distributing compiled kernel packages, provide the corresponding source,
+patches, configuration, and build scripts as required by the applicable licenses.
+
+## Acknowledgements
+
+This project began as a fork of [psygreg/linux-psycachy](https://github.com/psygreg/linux-psycachy),
+created by [psygreg](https://github.com/psygreg). Thank you to psygreg for the
+original PsyCachy builder and Debian/Ubuntu kernel configuration.
+
+Thanks also to [CachyOS](https://github.com/CachyOS) and the Linux kernel and patch
+authors whose work makes these builds possible.

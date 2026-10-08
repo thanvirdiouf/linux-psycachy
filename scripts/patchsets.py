@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Pin, verify, and configure immutable CachyOS patch snapshots."""
 
 import argparse
