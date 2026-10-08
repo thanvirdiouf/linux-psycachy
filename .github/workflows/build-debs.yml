@@ -232,7 +232,7 @@ jobs:
       - name: Publish packages and release notes
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PSYCACHY_RELEASE_TOKEN }}
         run: |
           tag="psycachy-$KERNEL_VERSION-build-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
           notes="$RUNNER_TEMP/release-notes.md"
