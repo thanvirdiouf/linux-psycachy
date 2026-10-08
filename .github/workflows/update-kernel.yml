@@ -1,0 +1,115 @@
+name: Check kernel updates
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-updater
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  check:
+    name: Discover and propose a stable update
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      build: ${{ steps.update.outputs.build }}
+      version: ${{ steps.discover.outputs.version }}
+      commit: ${{ steps.update.outputs.commit }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Test updater and builder
+        shell: bash
+        run: |
+          bash -n build.sh
+          python3 -m unittest discover -s tests -v
+
+      - name: Find a newer release in the current series
+        id: discover
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/update_kernel.py
+
+      - name: Pin the release and open an update PR
+        id: update
+        if: steps.discover.outputs.update == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_VERSION: ${{ steps.discover.outputs.version }}
+          SOURCE_RELEASE: ${{ steps.discover.outputs.release }}
+          UPDATE_BRANCH: ${{ steps.discover.outputs.branch }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" --state all \
+            --json url --jq '.[0].url // empty')
+          if [[ -n $existing ]]; then
+            printf 'Existing update PR: %s\n' "$existing" >> "$GITHUB_STEP_SUMMARY"
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 scripts/update_kernel.py --apply --expected-release "$SOURCE_RELEASE"
+          remote=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH")
+          if [[ -n $remote ]]; then
+            # Recover a branch left behind if an earlier PR creation failed.
+            # Preserve its contents; require the same pinned source before building.
+            git fetch --no-tags origin "$UPDATE_BRANCH"
+            git show FETCH_HEAD:src/releases.tsv > "$RUNNER_TEMP/remote-releases.tsv"
+            pinned=$(awk -v version="$KERNEL_VERSION" '$1 == version {print $0}' src/releases.tsv)
+            grep -Fx -- "$pinned" "$RUNNER_TEMP/remote-releases.tsv"
+            commit=$(git rev-parse FETCH_HEAD)
+          else
+            git switch -c "$UPDATE_BRANCH"
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src/releases.tsv src/default-version src/patches/SOURCES.md
+            git commit -m "Add Linux $KERNEL_VERSION support"
+            git push origin "HEAD:refs/heads/$UPDATE_BRANCH"
+            commit=$(git rev-parse HEAD)
+          fi
+          printf '\n[Update workflow run](%s/%s/actions/runs/%s)\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            >> "$RUNNER_TEMP/kernel-update-pr.md"
+          url=$(gh pr create --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" \
+            --title "Add Linux $KERNEL_VERSION support" \
+            --body-file "$RUNNER_TEMP/kernel-update-pr.md")
+          printf 'Update PR: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+          printf 'build=true\ncommit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Report no update
+        if: steps.discover.outputs.update != 'true'
+        shell: bash
+        run: echo 'No newer supported stable release found.' >> "$GITHUB_STEP_SUMMARY"
+
+  build-update:
+    name: Build the proposed kernel
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    # The called workflow contains a manual release job requiring this permission.
+    # Its compilation jobs use contents: read; publication is disabled for updates.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-debs.yml
+    with:
+      kernel_version: ${{ needs.check.outputs.version }}
+      source_ref: ${{ needs.check.outputs.commit }}
+      publish_release: false

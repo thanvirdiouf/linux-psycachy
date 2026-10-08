@@ -1,12 +1,23 @@
 name: Build Debian kernel packages
 
 on:
+  workflow_call:
+    inputs:
+      kernel_version:
+        required: true
+        type: string
+      source_ref:
+        description: Exact source commit to build
+        required: true
+        type: string
+      publish_release:
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: Stable kernel version pinned in src/releases.tsv
-        required: true
-        default: '7.2.9'
+        description: Pinned kernel version (blank uses src/default-version)
+        required: false
         type: string
       publish_release:
         description: Publish a GitHub Release after a successful build
@@ -19,16 +30,20 @@ on:
       - build.sh
       - src/config
       - src/releases.tsv
+      - src/default-version
       - src/patches/**
       - tests/**
+      - scripts/update_kernel.py
       - .github/workflows/build-debs.yml
   pull_request:
     paths:
       - build.sh
       - src/config
       - src/releases.tsv
+      - src/default-version
       - src/patches/**
       - tests/**
+      - scripts/update_kernel.py
       - .github/workflows/build-debs.yml
 
 permissions:
@@ -39,7 +54,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KERNEL_VERSION: ${{ inputs.kernel_version || '7.2.9' }}
+  BUILD_COMMIT: ${{ inputs.source_ref || github.sha }}
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
@@ -47,11 +62,29 @@ jobs:
     name: Validate builder
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      kernel-version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
+      - name: Select the kernel version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          version="$REQUESTED_VERSION"
+          if [[ -z $version ]]; then
+            version=$(<src/default-version)
+          fi
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid kernel version: $version" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Check shell syntax and run regression tests
         shell: bash
         run: |
@@ -63,6 +96,8 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 330
+    env:
+      KERNEL_VERSION: ${{ needs.validate.outputs.kernel-version }}
     outputs:
       artifact-id: ${{ steps.packages.outputs.artifact-id }}
     defaults:
@@ -72,6 +107,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
       - name: Free space for kernel compilation
@@ -127,7 +163,7 @@ jobs:
           fi
           cp "src/build-$KERNEL_VERSION/.config" dist/kernel.config
           printf 'Kernel: %s\nCommit: %s\nRun: %s\n' \
-            "$KERNEL_VERSION" "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/BUILD.txt
+            "$KERNEL_VERSION" "$BUILD_COMMIT" "$GITHUB_RUN_ID" > dist/BUILD.txt
           (cd dist && sha256sum ./*.deb > SHA256SUMS)
 
       - name: Upload Debian packages
@@ -154,10 +190,12 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [validate, build]
     if: github.event_name == 'workflow_dispatch' && inputs.publish_release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      KERNEL_VERSION: ${{ needs.validate.outputs.kernel-version }}
     permissions:
       contents: write
     steps:
@@ -199,12 +237,12 @@ jobs:
           Download the image, headers, and libc development .deb packages and
           SHA256SUMS, then verify them with: sha256sum --check SHA256SUMS
 
-          Source commit: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA
+          Source commit: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$BUILD_COMMIT
           Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
           gh release create "$tag" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$BUILD_COMMIT" \
             --title "PsyCachy $KERNEL_VERSION (build $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)" \
             --notes-file "$notes"
           printf 'Published [%s](%s/%s/releases/tag/%s)\n' \

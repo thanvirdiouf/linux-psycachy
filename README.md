@@ -9,9 +9,9 @@ Build on an **x86_64 Debian/Ubuntu system**:
 ./build.sh 7.2.9
 ```
 
-The builder selects a source release from [src/releases.tsv](src/releases.tsv),
-currently `cachyos-7.2.9-2`, verifies its
-SHA-256, adds BORE 6.8.0 and the Debian headers configuration fix, and builds
+The builder selects a source release from [src/releases.tsv](src/releases.tsv)
+and verifies its SHA-256. The validated 7.2.9 release uses `cachyos-7.2.9-2`.
+The builder adds BORE 6.8.0 and the Debian headers configuration fix, and builds
 with GCC. The configuration is migrated from PsyCachy's Debian/Ubuntu config
 and targets generic x86-64 CPUs. Core CachyOS changes, BBR3, and ADIOS are already in
 the source archive. See [source provenance](src/patches/SOURCES.md).
@@ -39,7 +39,8 @@ patch contents match. Edit `src/config` to customize the configuration.
 Set `JOBS=4 ./build.sh 7.2.9` to limit compilation parallelism. Packages are
 written to `src/`; the builder does not install the resulting kernel.
 
-Supported releases are listed in `src/releases.tsv`; currently that is 7.2.9.
+Registered releases are listed in `src/releases.tsv`. Linux 7.2.9 has been
+compiled, installed, and boot-tested; automated update candidates need review.
 Patch failures stop the build immediately without prompting for files.
 If you previously ran the archived builder, its partially patched
 `src/linux-7.2.9` directory is preserved and is not used by the new builder.
@@ -80,8 +81,9 @@ for the selected source; review configuration changes for new kernel series.
 
 The [Build Debian kernel packages](.github/workflows/build-debs.yml) workflow
 validates the builder, then compiles and packages a pinned release on Ubuntu 24.04.
-The default remains Linux 7.2.9. Manual runs accept a `kernel_version` input,
-which must match an entry in `src/releases.tsv`.
+The default version is stored in [src/default-version](src/default-version).
+Manual runs accept a `kernel_version` input, which must match an entry in
+`src/releases.tsv`; leave it blank to build the default version.
 It runs when build-related files change on `master` or `main`, on pull requests,
 and manually through **Actions → Build Debian kernel packages → Run workflow**.
 The workflow becomes available after these commits are pushed to GitHub.
@@ -111,6 +113,56 @@ CI builds omit debug information, BTF, and sched_ext to keep disk usage manageab
 on standard runners. They use `genksyms` for module versioning and retain generic
 x86-64 hardware support, BORE, BBR3, and ADIOS. Local builds continue to use
 `src/config` as configured above.
+
+## Automated kernel updates
+
+The [Check kernel updates](.github/workflows/update-kernel.yml) workflow checks
+CachyOS releases daily at 03:23 UTC (08:53 India time), or when run manually.
+It follows the series of `src/default-version`: with `7.2.9` selected, it looks
+for newer `7.2.x` releases. It skips release candidates, other series, and source
+revisions of an already registered kernel version.
+
+For a new stable version, the updater:
+
+1. Downloads the exact CachyOS source archive and calculates its SHA-256, checking
+   the published asset size and SHA-256 digest when GitHub supplies one.
+2. Adds the pinned release to `src/releases.tsv`, updates `src/default-version`,
+   and records candidate provenance in `src/patches/SOURCES.md`.
+3. Opens a PR from `codex/linux-<version>` to the default branch, preserving older
+   manifest entries and existing patches and configuration.
+4. Calls the package workflow to compile that exact proposed commit and upload
+   packages and diagnostics in the **Check kernel updates** run.
+
+Once these changes are pushed, enable **Settings → Actions → General → Workflow
+permissions → Allow GitHub Actions to create and approve pull requests**.
+The updater uses `GITHUB_TOKEN` and needs no additional secret. It does not
+approve or merge PRs. Repository or organization policies can restrict this
+setting; if PR creation is refused, enable it and rerun the workflow. A branch
+left by a failed PR creation is reused only when its pinned source matches.
+
+Review the PR and build logs, download and boot-test its packages, then merge it.
+Publish through a manual build with the release checkbox enabled, or attach the
+already tested packages to a release yourself to avoid recompiling. Compilation
+alone does not establish boot or hardware compatibility. Patch failures require
+a manual patch update; a new kernel series requires its own BORE patch before
+switching `src/default-version` to that series.
+
+Existing open or closed update PRs are skipped, so the daily check does not keep
+rebuilding or reopening the same proposal. To retry a failed build after editing
+the branch, run **Build Debian kernel packages** manually on that branch and
+select its candidate kernel version. The updater proposes the newest eligible
+version each time; review any older pending update PRs when a newer one appears.
+
+For a local discovery check without changing files or downloading the archive:
+
+```sh
+python3 scripts/update_kernel.py
+```
+
+To register a discovered candidate locally, run the script with `--apply`, inspect
+the resulting diff, then run `./build.sh <version> --prepare-only` and the tests.
+For manual updates, maintain both `src/releases.tsv` and `src/default-version`;
+workflow YAML no longer needs a version edit.
 
 # Original archive notice
 
