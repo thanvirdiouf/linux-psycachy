@@ -28,10 +28,12 @@ class BuilderTests(unittest.TestCase):
         self.common_dir = src / "patches" / "common"
         self.common_dir.mkdir()
         self.manifest = src / "releases.tsv"
+        (src / "llvm-version").write_text("18\n")
         (src / "config").write_text(
             "CONFIG_CACHY=y\nCONFIG_SCHED_BORE=y\n"
             "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y\n"
             "CONFIG_TCP_CONG_BBR3=m\nCONFIG_MQ_IOSCHED_ADIOS=m\n"
+            "CONFIG_CC_IS_GCC=y\nCONFIG_LTO_NONE=y\n"
         )
 
         tree = self.root / "source"
@@ -59,6 +61,10 @@ class BuilderTests(unittest.TestCase):
 
         binaries = self.root / "bin"
         binaries.mkdir()
+        for name in ("clang", "clang++", "ld.lld", "llvm-ar", "llvm-nm", "llvm-strip",
+                     "llvm-objcopy", "llvm-objdump", "llvm-readelf"):
+            output = "Ubuntu LLD 18.1.3" if name == "ld.lld" else "Ubuntu clang version 18.1.3"
+            self.executable(binaries / (name + "-18"), f'echo "{output}"')
         self.executable(binaries / "dpkg-query", "printf installed")
         self.executable(binaries / "uname", "echo x86_64")
         self.executable(binaries / "nproc", 'echo "${TEST_CPUS:-8}"')
@@ -67,12 +73,20 @@ class BuilderTests(unittest.TestCase):
             binaries / "make",
             'echo "$*" >> "$BUILD_LOG"\n'
             'if [[ -n ${FAIL_TARGET:-} && " $* " == *" $FAIL_TARGET "* ]]; then exit 2; fi\n'
+            'if [[ " $* " == *" olddefconfig "* && " $* " == *" LLVM=-18 "* ]]; then\n'
+            '  sed -i "/^CONFIG_CC_IS_GCC=/d; /^CONFIG_LTO_NONE=/d" .config\n'
+            '  printf "CONFIG_CC_IS_CLANG=y\\nCONFIG_LD_IS_LLD=y\\nCONFIG_AS_IS_LLVM=y\\n" >> .config\n'
+            '  if [[ ${DROP_THINLTO:-0} != 1 ]]; then echo CONFIG_LTO_CLANG_THIN=y >> .config; fi\n'
+            'fi\n'
             'if [[ " $* " == *" kernelversion "* ]]; then echo "${TEST_KERNEL_VERSION:-7.2.9}"; fi',
         )
         self.log = self.root / "make.log"
         self.config_log = self.root / "config.log"
         self.env = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}",
                         BUILD_LOG=str(self.log), CONFIG_LOG=str(self.config_log))
+        self.env["TOOLCHAIN"] = "gcc"
+        for name in ("LLVM_VERSION", "LLVM", "LLVM_IAS"):
+            self.env.pop(name, None)
         self.env.pop("JOBS", None)
         self.env.pop("PAHOLE", None)
         self.env.pop("INSTALL_DEPS", None)
@@ -88,6 +102,61 @@ class BuilderTests(unittest.TestCase):
             env=dict(self.env, **env), text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=15,
         )
+
+    def test_default_uses_llvm_for_every_stage_and_distinct_kernel_identity(self):
+        result = self.run_builder("7.2.9", TOOLCHAIN="")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.log.read_text().splitlines()
+        self.assertTrue(all("LLVM=-18 LLVM_IAS=1" in call for call in calls))
+        self.assertTrue(all("CC=gcc" not in call for call in calls))
+        self.assertIn("LOCALVERSION=-psycachy-llvm KDEB_PKGVERSION=7.2.9-2", calls[-1])
+        tree = self.repo / "src/build-7.2.9-clang-thinlto"
+        self.assertIn("clang version 18.1.3", (tree / "TOOLCHAIN.txt").read_text())
+        self.assertIn("CONFIG_LTO_CLANG_THIN=y", (tree / ".config").read_text())
+
+    def test_switch_to_clang_preserves_existing_gcc_objects(self):
+        gcc = self.run_builder("7.2.9", "--prepare-only")
+        self.assertEqual(gcc.returncode, 0, gcc.stdout)
+        old_tree = self.repo / "src/build-7.2.9"
+        before = (old_tree / ".config").read_bytes()
+        (old_tree / "existing.o").write_text("GCC object")
+        clang = self.run_builder("7.2.9", "--prepare-only", TOOLCHAIN="")
+        self.assertEqual(clang.returncode, 0, clang.stdout)
+        self.assertEqual((old_tree / ".config").read_bytes(), before)
+        self.assertEqual((old_tree / "existing.o").read_text(), "GCC object")
+
+    def test_dropped_thinlto_stops_before_packaging(self):
+        result = self.run_builder("7.2.9", TOOLCHAIN="", DROP_THINLTO="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CONFIG_LTO_CLANG_THIN", result.stdout)
+        self.assertNotIn("bindeb-pkg", self.log.read_text())
+
+    def test_compiler_change_requires_fresh_build_tree(self):
+        result = self.run_builder("7.2.9", "--prepare-only", TOOLCHAIN="")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.executable(self.root / "bin/clang-18", 'echo "Ubuntu clang version 18.1.4"')
+        result = self.run_builder("7.2.9", TOOLCHAIN="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different compiler or linker", result.stdout)
+        self.assertNotIn("bindeb-pkg", self.log.read_text())
+
+    def test_wrong_llvm_major_and_missing_toolchain_stop_before_preparation(self):
+        self.executable(self.root / "bin/clang-18", 'echo "Ubuntu clang version 19.1.0"')
+        result = self.run_builder("7.2.9", TOOLCHAIN="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match LLVM_VERSION=18", result.stdout)
+        self.assertFalse(self.log.exists())
+        result = self.run_builder("7.2.9", TOOLCHAIN="", LLVM_VERSION="987")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Required tool is missing: clang-987", result.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_invalid_toolchain_inputs_stop_before_preparation(self):
+        for env in ({"TOOLCHAIN": "unknown"}, {"TOOLCHAIN": "", "LLVM_VERSION": "../18"}):
+            with self.subTest(env=env):
+                result = self.run_builder("7.2.9", **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.log.exists())
 
     def test_rejects_unsupported_version_before_any_work(self):
         result = self.run_builder("7.3.0")

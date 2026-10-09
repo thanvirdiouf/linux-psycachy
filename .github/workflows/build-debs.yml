@@ -32,6 +32,7 @@ on:
       - src/config
       - src/releases.tsv
       - src/default-version
+      - src/llvm-version
       - src/patches/**
       - tests/**
       - scripts/**
@@ -42,6 +43,7 @@ on:
       - src/config
       - src/releases.tsv
       - src/default-version
+      - src/llvm-version
       - src/patches/**
       - tests/**
       - scripts/**
@@ -57,6 +59,7 @@ concurrency:
 env:
   BUILD_COMMIT: ${{ inputs.source_ref || github.sha }}
   PYTHONDONTWRITEBYTECODE: '1'
+  TOOLCHAIN: clang-thinlto
 
 jobs:
   validate:
@@ -128,7 +131,7 @@ jobs:
         run: |
           # Full DWARF plus debug .debs can exhaust a hosted runner's disk.
           # Keep generic hardware support, BORE, BBR3, ADIOS, and module versioning.
-          "src/build-$KERNEL_VERSION/scripts/config" --file src/config \
+          "src/build-$KERNEL_VERSION-clang-thinlto/scripts/config" --file src/config \
             --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
             --disable DEBUG_INFO_DWARF4 --disable DEBUG_INFO_DWARF5 \
             --enable DEBUG_INFO_NONE \
@@ -162,7 +165,8 @@ jobs:
           if [[ ${#metadata[@]} -gt 0 ]]; then
             cp "${metadata[@]}" dist/
           fi
-          cp "src/build-$KERNEL_VERSION/.config" dist/kernel.config
+          cp "src/build-$KERNEL_VERSION-clang-thinlto/.config" dist/kernel.config
+          cp "src/build-$KERNEL_VERSION-clang-thinlto/TOOLCHAIN.txt" dist/TOOLCHAIN.txt
           python3 - "$KERNEL_VERSION" <<'PY'
           import json, pathlib, shutil, sys
           from scripts import patchsets
@@ -191,7 +195,8 @@ jobs:
           name: psycachy-build-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build.log
-            src/build-${{ env.KERNEL_VERSION }}/.config
+            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/.config
+            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/TOOLCHAIN.txt
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
@@ -220,6 +225,7 @@ jobs:
           sha256sum --check SHA256SUMS
           test -s kernel.config
           test -s BUILD.txt
+          test -s TOOLCHAIN.txt
           shopt -s nullglob
           for prefix in linux-image linux-headers linux-libc-dev; do
             packages=("$prefix"*.deb)
@@ -239,7 +245,8 @@ jobs:
           cat > "$notes" <<EOF
           PsyCachy Linux $KERNEL_VERSION for generic x86-64 Debian/Ubuntu systems.
 
-          Built with GCC, BORE, BBR3, and ADIOS. CI builds omit debug information,
+          Built with Clang/LLVM and ThinLTO, BORE, BBR3, and ADIOS.
+          Compiler versions are recorded in TOOLCHAIN.txt. CI builds omit debug information,
           BTF, and sched_ext. The resolved configuration is attached as kernel.config.
 
           Download the image, headers, and libc development .deb packages and

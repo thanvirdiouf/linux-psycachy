@@ -10,7 +10,7 @@ The validated 7.2.9 snapshot preserves the existing BORE and Debian headers fix
 byte-for-byte, with no extra modules. Versions without a snapshot retain the
 legacy series/common patch selection for manual maintenance.
 
-## Current validated source
+## Source validated with the earlier GCC build
 
 The builder uses the CachyOS source release `cachyos-7.2.9-2`, which already
 contains CachyOS's core changes, BBR3, and the ADIOS I/O scheduler. It does not
@@ -29,6 +29,14 @@ Its first hunk is rebased around the `task_ipi_mask` definition added before
 
 `common/0002-debian-headers-config.patch` rebases PsyCachy's original `config.patch`
 so the Debian headers package contains `.config` for external module builds.
+
+## Toolchain transition
+
+The maintained builder now defaults to Clang/LLVM with ThinLTO, using the LLVM
+major version in `src/llvm-version`. This leaves the pinned sources and patch
+snapshots unchanged. The earlier GCC build was boot-tested; that validation does
+not establish compatibility for the new compiler and LTO settings. Full package,
+boot, hardware, and external-module testing is required for Clang builds.
 
 ## Patch refresh on new Linux versions
 

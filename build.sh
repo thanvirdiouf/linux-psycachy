@@ -5,6 +5,7 @@ set -Eeuo pipefail
 usage() {
     echo "Usage: $0 <version> [--prepare-only]"
     echo "Example: $0 7.2.9"
+    echo "Default: Clang/LLVM with ThinLTO. Set TOOLCHAIN=gcc for a GCC build."
 }
 
 if [[ ${1:-} == --help ]]; then
@@ -71,7 +72,36 @@ if [[ ! $jobs =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 archive="$repo_dir/src/$source_release.tar.gz"
-build_dir="$repo_dir/src/build-$version"
+toolchain=${TOOLCHAIN:-clang-thinlto}
+make_args=()
+case "$toolchain" in
+    clang-thinlto)
+        llvm_version=${LLVM_VERSION:-$(<"$repo_dir/src/llvm-version")}
+        if [[ ! $llvm_version =~ ^[1-9][0-9]*$ ]]; then
+            echo "LLVM_VERSION must be a positive major version." >&2
+            exit 1
+        fi
+        export LLVM="-$llvm_version" LLVM_IAS=1
+        make_args=("LLVM=$LLVM" LLVM_IAS=1)
+        build_dir="$repo_dir/src/build-$version-clang-thinlto"
+        local_version=-psycachy-llvm
+        package_version="$version-2"
+        tools=(clang clang++ ld.lld llvm-ar llvm-nm llvm-strip llvm-objcopy llvm-objdump llvm-readelf)
+        for index in "${!tools[@]}"; do tools[$index]="${tools[$index]}-$llvm_version"; done
+        ;;
+    gcc)
+        unset LLVM LLVM_IAS
+        make_args=(CC=gcc HOSTCC=gcc HOSTCXX=g++)
+        build_dir="$repo_dir/src/build-$version"
+        local_version=-psycachy
+        package_version="$version-1"
+        tools=(gcc g++ ld ar nm strip objcopy objdump readelf)
+        ;;
+    *)
+        echo "Unsupported TOOLCHAIN: $toolchain. Use clang-thinlto or gcc." >&2
+        exit 1
+        ;;
+esac
 staging_dir=
 trap 'echo "Build failed at line $LINENO." >&2' ERR
 trap 'if [[ -n $staging_dir ]]; then rm -rf -- "$staging_dir"; fi' EXIT
@@ -79,6 +109,9 @@ trap 'if [[ -n $staging_dir ]]; then rm -rf -- "$staging_dir"; fi' EXIT
 # Reject unsupported versions before downloading or installing dependencies.
 dependencies=(build-essential bc bison flex libssl-dev libelf-dev libdw-dev libncurses-dev
     pkg-config python3 perl openssl curl zstd xz-utils)
+if [[ $toolchain == clang-thinlto ]]; then
+    dependencies+=("clang-$llvm_version" "lld-$llvm_version" "llvm-$llvm_version")
+fi
 if [[ ${2:-} != --prepare-only ]]; then
     dependencies+=(git cpio kmod rsync fakeroot debhelper)
 fi
@@ -97,6 +130,32 @@ if [[ ${#missing[@]} -gt 0 ]]; then
         sudo apt-get install -y "${missing[@]}"
     fi
 fi
+
+# Record the toolchain and reject reuse after a compiler or linker change.
+toolchain_info=$(printf 'Toolchain: %s\n' "$toolchain"
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" >/dev/null; then
+            echo "Required tool is missing: $tool" >&2
+            exit 1
+        fi
+        output=$("$tool" --version)
+        if [[ $toolchain == clang-thinlto && $tool == "clang-$llvm_version" && ! $output =~ clang\ version\ $llvm_version\. ]]; then
+            echo "Compiler does not match LLVM_VERSION=$llvm_version: $tool" >&2
+            exit 1
+        fi
+        if [[ $toolchain == clang-thinlto && $tool == "ld.lld-$llvm_version" && ! $output =~ LLD\ $llvm_version\. ]]; then
+            echo "Linker does not match LLVM_VERSION=$llvm_version: $tool" >&2
+            exit 1
+        fi
+        printf '%s: %s\n' "$tool" "${output%%$'\n'*}"
+    done)
+toolchain_id=$(printf '%s\n' "$toolchain_info" | sha256sum | cut -d ' ' -f1)
+if [[ -f $build_dir/.psycachy-toolchain && $(<"$build_dir/.psycachy-toolchain") != "$toolchain_id" ]]; then
+    echo "Existing build tree uses a different compiler or linker: $build_dir" >&2
+    echo "Move it aside before changing toolchains." >&2
+    exit 1
+fi
+printf '%s\n' "$toolchain_info"
 
 # A completed preparation can be reused after an interrupted compilation.
 patch_fingerprint=$(
@@ -152,9 +211,19 @@ else
 fi
 
 cd -- "$build_dir"
+printf '%s\n' "$toolchain_id" > .psycachy-toolchain
+printf '%s\n' "$toolchain_info" > TOOLCHAIN.txt
 cp -- "$repo_dir/src/config" .config
 if [[ $locked_patches == 1 ]]; then
     python3 "$repo_dir/scripts/patchsets.py" configure "$repo_dir" "$version" "$build_dir"
+fi
+
+if [[ $toolchain == clang-thinlto ]]; then
+    scripts/config --disable LTO_NONE --disable LTO_CLANG_FULL \
+        --disable LTO_CLANG_THIN_DIST --enable LTO_CLANG_THIN
+else
+    scripts/config --disable LTO_CLANG_FULL --disable LTO_CLANG_THIN \
+        --disable LTO_CLANG_THIN_DIST --enable LTO_NONE
 fi
 
 # Ubuntu LTS ships older pahole; BORE itself does not require BTF.
@@ -163,9 +232,20 @@ if [[ $(scripts/pahole-version.sh "${PAHOLE:-pahole}") -lt 126 ]]; then
     scripts/config --disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES \
         --disable SCHED_CLASS_EXT
 fi
-make CC=gcc olddefconfig
+make "${make_args[@]}" olddefconfig
 if [[ $locked_patches == 1 ]]; then
     python3 "$repo_dir/scripts/patchsets.py" verify-config "$repo_dir" "$version" "$build_dir"
+fi
+if [[ $toolchain == clang-thinlto ]]; then
+    for symbol in CC_IS_CLANG LD_IS_LLD AS_IS_LLVM LTO_CLANG_THIN; do
+        if ! grep -qx "CONFIG_$symbol=y" .config; then
+            echo "Required Clang/ThinLTO option is missing: CONFIG_$symbol" >&2
+            exit 1
+        fi
+    done
+elif ! grep -qx 'CONFIG_CC_IS_GCC=y' .config || ! grep -qx 'CONFIG_LTO_NONE=y' .config; then
+    echo "Required GCC configuration is missing." >&2
+    exit 1
 fi
 for symbol in CACHY SCHED_BORE CC_OPTIMIZE_FOR_PERFORMANCE_O3; do
     if ! grep -qx "CONFIG_$symbol=y" .config; then
@@ -179,16 +259,16 @@ for symbol in TCP_CONG_BBR3 MQ_IOSCHED_ADIOS; do
         exit 1
     fi
 done
-if [[ $(make -s CC=gcc kernelversion) != "$version" ]]; then
+if [[ $(make -s "${make_args[@]}" kernelversion) != "$version" ]]; then
     echo "Source version does not match $version." >&2
     exit 1
 fi
 
 if [[ ${2:-} == --prepare-only ]]; then
-    make CC=gcc prepare
+    make "${make_args[@]}" prepare
     echo "Kernel source and configuration prepared: $build_dir"
     exit 0
 fi
 
-make CC=gcc bindeb-pkg -j"$jobs" LOCALVERSION=-psycachy KDEB_PKGVERSION="$version-1"
+make "${make_args[@]}" bindeb-pkg -j"$jobs" "LOCALVERSION=$local_version" "KDEB_PKGVERSION=$package_version"
 echo "Kernel build complete. Debian packages are in $repo_dir/src."

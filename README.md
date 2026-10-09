@@ -1,18 +1,21 @@
 # PsyCachy Linux
 
 Build CachyOS-based Linux kernels for **Debian and Ubuntu**, with generic
-**x86-64** support, GCC compilation, and Debian packages ready to install.
+**x86-64** support, Clang/LLVM compilation with **ThinLTO**, and Debian packages
+ready to install.
 PsyCachy combines BORE scheduling with the CachyOS source tree's BBR3 congestion
 control and ADIOS I/O scheduler. GitHub Actions handles package builds and
 proposes updates when a newer supported stable kernel becomes available.
 
-Linux **7.2.9** has been compiled, installed, and boot-tested. The default
+The earlier **GCC build of Linux 7.2.9** has been compiled, installed, and
+boot-tested. Clang/ThinLTO packages require their own full build, boot, and DKMS
+validation. The default
 version is recorded in [src/default-version](src/default-version), and all
 registered versions are listed in [src/releases.tsv](src/releases.tsv).
 
 ## Features
 
-- GCC builds for generic x86-64 hardware, without CPU-specific build variants.
+- Clang/LLVM with ThinLTO for generic x86-64 hardware, plus an explicit GCC fallback.
 - BORE scheduling, BBR3 as the `tcp_bbr3` module, and ADIOS from the CachyOS source.
 - Kernel image, headers, and libc development `.deb` packages.
 - Verified source archives and immutable patch snapshots for registered builds.
@@ -60,7 +63,14 @@ verifies the pinned source archive, checks the selected patches, migrates
 It does not install the resulting kernel.
 
 Missing build and packaging dependencies are installed through `sudo apt-get`.
-Set `INSTALL_DEPS=0` to use tools you have supplied yourself.
+The default toolchain family is **LLVM 18**, recorded in
+[src/llvm-version](src/llvm-version). The builder installs `clang-18`, `lld-18`,
+and `llvm-18` alongside the packaging dependencies, and uses `LLVM=-18` with the
+LLVM integrated assembler throughout configuration and compilation. Exact tool
+versions are recorded in `TOOLCHAIN.txt`; distro package updates can change them.
+Set `INSTALL_DEPS=0` to use tools you have supplied yourself. A local override
+such as `LLVM_VERSION=19` requires a complete matching toolchain and separate
+validation. Changing compiler versions requires a fresh build tree.
 
 To prepare sources without compiling the complete kernel:
 
@@ -74,14 +84,36 @@ To limit compilation parallelism:
 JOBS=4 ./build.sh 7.2.9
 ```
 
-Prepared sources live in `src/build-<version>`. Subsequent runs reuse that tree
+To build with GCC without LTO instead:
+
+```sh
+TOOLCHAIN=gcc ./build.sh 7.2.9
+```
+
+Clang builds use `src/build-<version>-clang-thinlto` and the kernel suffix
+`-psycachy-llvm`; GCC builds retain `src/build-<version>` and `-psycachy`.
+Their kernel images and headers can coexist. Clang package revisions use
+`<version>-2`, while GCC uses `<version>-1`; `linux-libc-dev` remains a shared
+package. Existing GCC object files are preserved.
+
+Subsequent runs reuse the selected tree
 when its source and patch fingerprints match. Patch order, patch contents, and
 optional configuration changes are included in this check; moving patch files
-alone does not invalidate a prepared build.
+alone does not invalidate a prepared build. Compiler and linker versions are
+also checked before reuse.
 
 Edit `src/config` to customize local builds. With `pahole` older than 1.26, the
 builder disables BTF and sched_ext. Install `pahole` 1.26 or newer before building
 if you need BTF-dependent BPF programs.
+
+### External modules and DKMS
+
+A Clang/ThinLTO kernel needs compatible tools when building external modules.
+Use the selected toolchain consistently, for example `make LLVM=-18 LLVM_IAS=1`
+with that kernel's headers. DKMS integrations may need package-specific build
+settings; do not assume their default GCC commands will work. Validate the
+external modules you use, especially proprietary drivers, before replacing your
+working kernel. The builder does not change system DKMS configuration.
 
 ## GitHub Actions
 
@@ -98,25 +130,27 @@ The package artifact is named
 `psycachy-<version>-amd64-<run-id>-<attempt>` and contains:
 
 - The image, headers, and libc development `.deb` packages and `SHA256SUMS`.
-- The resolved `kernel.config` and build metadata.
+- The resolved `kernel.config`, compiler versions in `TOOLCHAIN.txt`, and build metadata.
 - `PATCHES.json` for locked builds, with patch provenance and configuration.
 
 Artifacts are retained for **14 days**. A separate diagnostic artifact contains
 the build log and configuration, including when compilation fails.
 
 CI builds omit debug information, BTF, and sched_ext to fit standard runners.
-They retain generic x86-64 support and use `genksyms` for module versioning.
+They use Clang/LLVM with ThinLTO, retain generic x86-64 support, and use
+`genksyms` for module versioning.
 Local builds use `src/config` with the builder's compatibility adjustments.
 
 ### Publish a release
 
-On a manual run, check **Publish a GitHub Release after a successful build**.
+On a manual run from `master`, check **Publish a GitHub Release after a successful build**.
 The release job downloads that run's artifact, verifies its checksums, and
 publishes the packages and metadata as release assets.
 
 Release tags use `psycachy-<version>-build-<run-number>-<attempt>` and point to the
 built commit. Release assets remain available after Actions artifacts expire.
-Publication uses `GITHUB_TOKEN`; no additional secret is required.
+Publication uses the repository secret `PSYCACHY_RELEASE_TOKEN`, which must
+allow release creation and asset uploads. The release job runs only on `master`.
 
 **Push, pull-request, and automated update builds upload artifacts without
 publishing releases.** To publish an already completed build without recompiling,
@@ -172,6 +206,7 @@ Release publication remains a separate manual step.
 | `src/releases.tsv` | Pinned source releases and archive checksums |
 | `src/default-version` | Default CI version and updater's selected kernel series |
 | `src/config` | Base kernel configuration |
+| `src/llvm-version` | Default LLVM major version for local and CI builds |
 | `src/patches/profile.json` | Optional features for future automated updates |
 | `src/patches/releases.json` | Source-bound kernel-to-snapshot locks |
 | `src/patches/snapshots/` | Immutable, reusable patches and configuration |
