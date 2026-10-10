@@ -1,0 +1,31 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+set -euo pipefail
+if (( $# < 3 )) || [[ ! $1 =~ ^[1-9][0-9]*$ || ! $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm$ ]]; then
+    echo 'PsyCachy: invalid NVIDIA build arguments.' >&2
+    exit 2
+fi
+major=$1
+kernel=$2
+headers=$3
+shift 3
+# DKMS 3.0 appends unsuffixed CC/LD after MAKE[0], overriding make arguments.
+# Consume those defaults here; the actual make always uses the pinned family.
+for argument in "$@"; do
+    case "$argument" in
+        CC=*|LD=*|KERNELRELEASE="$kernel") ;;
+        *) echo "PsyCachy: unexpected DKMS argument: $argument" >&2; exit 2 ;;
+    esac
+done
+for tool in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+    command -v "$tool-$major" >/dev/null || {
+        echo "PsyCachy: install clang-$major, lld-$major and llvm-$major before rebuilding NVIDIA." >&2
+        exit 1
+    }
+done
+jobs=$(nproc)
+(( jobs <= 4 )) || jobs=4
+unset ARCH
+exec make -j"$jobs" "LLVM=-$major" LLVM_IAS=1 "CC=clang-$major" \
+    "LD=ld.lld-$major" "OBJDUMP=llvm-objdump-$major" NV_EXCLUDE_BUILD_MODULES= \
+    "KERNEL_UNAME=$kernel" IGNORE_XEN_PRESENCE=1 "SYSSRC=$headers" modules

@@ -271,4 +271,8 @@ if [[ ${2:-} == --prepare-only ]]; then
 fi
 
 make "${make_args[@]}" bindeb-pkg -j"$jobs" "LOCALVERSION=$local_version" "KDEB_PKGVERSION=$package_version"
+if [[ $toolchain == clang-thinlto ]]; then
+    python3 "$repo_dir/scripts/package_nvidia.py" --llvm-version "$llvm_version" --output "$repo_dir/src"
+fi
+cp -- "$repo_dir/scripts/install-packages.sh" "$repo_dir/src/install-packages.sh"
 echo "Kernel build complete. Debian packages are in $repo_dir/src."

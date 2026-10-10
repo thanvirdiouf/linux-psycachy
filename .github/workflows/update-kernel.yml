@@ -37,7 +37,9 @@ jobs:
       - name: Test updater and builder
         shell: bash
         run: |
-          bash -n build.sh
+          for script in build.sh scripts/install-packages.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
+            bash -n "$script"
+          done
           python3 -m unittest discover -s tests -v
 
       - name: Find a newer release in the current series

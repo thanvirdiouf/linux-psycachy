@@ -9,3 +9,4 @@ __pycache__/
 /src/*.deb
 /src/*.buildinfo
 /src/*.changes
+/src/install-packages.sh

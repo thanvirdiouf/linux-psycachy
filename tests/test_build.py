@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -50,6 +51,10 @@ class BuilderTests(unittest.TestCase):
         (self.repo / "build.sh").write_text(BUILDER.read_text())
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts/patchsets.py").write_text(Path(patchsets.__file__).read_text())
+        for name in ("package_nvidia.py", "install-packages.sh"):
+            shutil.copyfile(BUILDER.parent / "scripts" / name, self.repo / "scripts" / name)
+        shutil.copytree(BUILDER.parent / "packaging", self.repo / "packaging")
+        shutil.copyfile(BUILDER.parent / "LICENSE", self.repo / "LICENSE")
 
         for directory, name, target in (
             (self.patch_dir, "0001-bore-cachy.patch", "sample.txt"),

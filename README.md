@@ -8,8 +8,9 @@ control and ADIOS I/O scheduler. GitHub Actions handles package builds and
 proposes updates when a newer supported stable kernel becomes available.
 
 The earlier **GCC build of Linux 7.2.9** has been compiled, installed, and
-boot-tested. Clang/ThinLTO packages require their own full build, boot, and DKMS
-validation. The default
+boot-tested. The Clang/ThinLTO build and NVIDIA 595.99.02 open modules have passed
+compilation checks, including a DKMS build; boot and GPU validation remain pending.
+The default
 version is recorded in [src/default-version](src/default-version), and all
 registered versions are listed in [src/releases.tsv](src/releases.tsv).
 
@@ -18,6 +19,7 @@ registered versions are listed in [src/releases.tsv](src/releases.tsv).
 - Clang/LLVM with ThinLTO for generic x86-64 hardware, plus an explicit GCC fallback.
 - BORE scheduling, BBR3 as the `tcp_bbr3` module, and ADIOS from the CachyOS source.
 - Kernel image, headers, and libc development `.deb` packages.
+- Optional NVIDIA DKMS support package with matching LLVM dependencies.
 - Verified source archives and immutable patch snapshots for registered builds.
 - GitHub Actions builds, downloadable artifacts, and optional release publication.
 - Automated update PRs with refreshed patches and configurable optional modules.
@@ -33,14 +35,25 @@ Published packages are available under [Releases](https://github.com/thanvirdiou
 Successful workflow runs also provide packages under
 [Actions](https://github.com/thanvirdiouf/linux-psycachy/actions).
 
-Download the image, headers, and libc development packages for the same build,
-along with `SHA256SUMS`. If downloading an Actions artifact, extract it first.
-In a directory containing only that build's packages, run:
+Download that build's packages, `install-packages.sh`, and `SHA256SUMS` into
+one directory. If downloading an Actions artifact, extract it first. Run:
 
 ```sh
 sha256sum --check SHA256SUMS
-sudo apt install ./*.deb
+bash install-packages.sh
 ```
+
+For NVIDIA users who already have their distribution's NVIDIA DKMS driver installed:
+
+```sh
+bash install-packages.sh --nvidia
+```
+
+The installer first installs the optional `psycachy-nvidia-support` package and
+its LLVM dependencies, then installs the kernel and headers. This order ensures
+NVIDIA's modules build with the correct tools during installation. Without
+`--nvidia`, the optional support package is excluded. Older releases without
+the installer can be installed with `sudo apt install ./linux-*.deb`.
 
 Reboot and select the installed kernel from your boot menu. Keep a working kernel
 available while testing a new build. Compilation alone does not establish boot,
@@ -113,7 +126,42 @@ Use the selected toolchain consistently, for example `make LLVM=-18 LLVM_IAS=1`
 with that kernel's headers. DKMS integrations may need package-specific build
 settings; do not assume their default GCC commands will work. Validate the
 external modules you use, especially proprietary drivers, before replacing your
-working kernel. The builder does not change system DKMS configuration.
+working kernel. Building packages does not change system DKMS configuration.
+
+### NVIDIA support
+
+Clang builds also produce `psycachy-nvidia-support_<version>_amd64.deb`. This
+package configures NVIDIA DKMS builds only for `*-psycachy-llvm` kernels. It reads
+the LLVM family from the installed headers and uses a wrapper to prevent DKMS
+from replacing the versioned compiler/linker with unsuffixed defaults. Other
+kernels keep their existing build settings. More-specific administrator DKMS
+overrides still take precedence.
+
+The support package supplies configuration and tool dependencies. Install your
+distribution's driver package appropriate for your GPU first; it does not bundle
+NVIDIA modules or choose a driver branch. Driver upgrades use the same scoped
+configuration, although newer kernels can still require newer drivers. If an
+existing `/etc/dkms/nvidia.conf` contains custom settings, installation stops
+instead of overwriting them; back it up and merge the PsyCachy override.
+
+Keep older LLVM families in [packaging/nvidia/llvm-versions](packaging/nvidia/llvm-versions)
+when changing the default compiler. Increment [packaging/nvidia/version](packaging/nvidia/version)
+when changing the helper so APT can upgrade it. The package retains its DKMS
+configuration on removal as a Debian conffile; purge it to remove that file.
+Without the helper's code, the retained file has no effect.
+
+To build only the support package without recompiling the kernel:
+
+```sh
+python3 scripts/package_nvidia.py --output dist
+```
+
+CI compiles the pinned NVIDIA **open** modules against the generated headers
+and checks every module's driver version and kernel vermagic. The pin and source
+hash are in [src/nvidia-validation.json](src/nvidia-validation.json); update them
+deliberately and rerun validation when changing the tested driver. This is a
+compilation check, not a GPU boot, rendering, suspend, or Secure Boot test.
+Closed/legacy driver branches are not covered by that check.
 
 ## GitHub Actions
 
@@ -130,11 +178,12 @@ The package artifact is named
 `psycachy-<version>-amd64-<run-id>-<attempt>` and contains:
 
 - The image, headers, and libc development `.deb` packages and `SHA256SUMS`.
+- The optional NVIDIA support `.deb`, `install-packages.sh`, and `NVIDIA-VALIDATION.txt`.
 - The resolved `kernel.config`, compiler versions in `TOOLCHAIN.txt`, and build metadata.
 - `PATCHES.json` for locked builds, with patch provenance and configuration.
 
 Artifacts are retained for **14 days**. A separate diagnostic artifact contains
-the build log and configuration, including when compilation fails.
+the kernel/NVIDIA build logs and configuration, including when compilation fails.
 
 CI builds omit debug information, BTF, and sched_ext to fit standard runners.
 They use Clang/LLVM with ThinLTO, retain generic x86-64 support, and use

@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+# Do not replace an administrator's existing module-wide configuration.
+if [ "$1" = install ] && [ -e /etc/dkms/nvidia.conf ] &&
+   ! grep -q '/usr/share/psycachy-nvidia-support/override.sh' /etc/dkms/nvidia.conf; then
+    echo 'PsyCachy: /etc/dkms/nvidia.conf already contains custom settings.' >&2
+    echo 'Back it up and merge the PsyCachy override before installing this support package.' >&2
+    exit 1
+fi

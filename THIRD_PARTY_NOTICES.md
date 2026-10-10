@@ -3,7 +3,7 @@
 ## Project contributions
 
 Contributions made for this maintained project to `build.sh`, `scripts/`,
-`tests/`, the build and update workflows, and project documentation are licensed
+`tests/`, `packaging/`, the build and update workflows, and project documentation are licensed
 under GNU GPL version 2 only (`GPL-2.0-only`). The full license text is in
 [LICENSE](LICENSE). The GPL identifiers on maintained files describe the
 project's distribution of those files; inherited material retains its original
@@ -72,3 +72,11 @@ modules, or settings downloaded by supporting scripts. Distribute those under
 their applicable licenses, and provide corresponding source and build materials
 when required. Adding these notices does not itself supply corresponding source
 for binary kernel releases.
+
+## NVIDIA integration
+
+The optional `psycachy-nvidia-support` package contains this project's DKMS
+configuration and build wrapper under GPL-2.0-only. It does not redistribute
+NVIDIA drivers. CI downloads checksum-pinned NVIDIA open module sources to test
+compilation; the resulting NVIDIA modules are not included in release packages.
+Installed NVIDIA drivers retain their own upstream licenses and notices.
