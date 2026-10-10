@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -185,6 +187,21 @@ class UpdateTests(unittest.TestCase):
                 patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
             updater.main()
         self.assertEqual(output.read_text(), "update=false\n")
+
+    def test_cli_reports_missing_keys_and_subprocess_failures(self):
+        script = self.root / "scripts/update_kernel.py"
+        script.parent.mkdir()
+        script.write_text(Path(updater.__file__).read_text())
+        errors = (KeyError("sha"), subprocess.CalledProcessError(2, ["tar", "-xzf", "archive.tar.gz"]))
+        for error in errors:
+            with self.subTest(error=type(error).__name__), \
+                    patch.dict("sys.modules", patchsets=updater.patchsets), \
+                    patch.object(updater.urllib.request, "urlopen", side_effect=error), \
+                    patch("sys.argv", [str(script)]), \
+                    self.assertRaises(SystemExit) as failure:
+                runpy.run_path(str(script), run_name="__main__")
+            expected = f"Missing expected key: {error}" if isinstance(error, KeyError) else str(error)
+            self.assertEqual(failure.exception.code, expected)
 
 
 if __name__ == "__main__":

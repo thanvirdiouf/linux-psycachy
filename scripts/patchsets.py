@@ -99,17 +99,22 @@ def apply_patch(tree, path, dry_run=False):
     return subprocess.run(command, text=True, capture_output=True)
 
 
-def adapt_bore(content, tree):
-    """Carry forward only the known context fix, without changing added code."""
+def adapt_bore(content, tree, details=""):
+    """Carry forward only the known context fix, without changing added code.
+
+    ``details`` is the failing ``patch`` output; it is appended to errors so a
+    reviewer can see which hunks need attention.
+    """
     text = content.decode()
+    failure = f":\n{details.strip()}" if details.strip() else ""
     old = "@@ -824,6 +824,31 @@ struct kmap_ctrl {\n #endif\n };\n \n"
     new = "@@ -839,6 +839,31 @@ struct task_ipi_mask {\n struct task_ipi_mask { };\n #endif\n \n"
     source = tree / "include/linux/sched.h"
     if text.count(old) != 1 or not source.is_file():
-        raise ValueError("BORE needs an unfamiliar rebase; review its failing hunks manually")
+        raise ValueError("BORE needs an unfamiliar rebase; review its failing hunks manually" + failure)
     context = "struct task_ipi_mask { };\n#endif\n\nstruct task_struct {"
     if context not in source.read_text():
-        raise ValueError("BORE context fix no longer matches the source; manual review required")
+        raise ValueError("BORE context fix no longer matches the source; manual review required" + failure)
     return text.replace(old, new, 1).encode()
 
 
@@ -187,7 +192,7 @@ def refresh(root, candidate, archive):
             adaptation = None
             result = apply_patch(tree, patch, dry_run=True)
             if result.returncode and name == "0001-bore-cachy.patch":
-                content = adapt_bore(content, tree)
+                content = adapt_bore(content, tree, result.stdout + result.stderr)
                 patch.write_bytes(content)
                 adaptation = "task_ipi_mask context only"
                 result = apply_patch(tree, patch, dry_run=True)
@@ -213,6 +218,9 @@ def main():
     args = parser.parse_args()
     folder, metadata = load(args.root, args.version)
     config = metadata["config"] if metadata else {}
+    # configure with an empty feature set is a no-op and needs no tree.
+    if args.tree is None and (args.command == "verify-config" or (args.command == "configure" and config)):
+        parser.error(f"{args.command} requires the kernel source tree argument")
     if args.command == "list":
         if not metadata:
             print(args.root / f"src/patches/{args.version.rsplit('.', 1)[0]}/0001-bore-cachy.patch")

@@ -181,6 +181,39 @@ class PatchsetTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CONFIG_AUFS_FS=m", result.stderr)
 
+    def test_missing_tree_is_reported_as_an_argument_error(self):
+        for features in ([], ["acpi-call"]):
+            (self.root / "src/patches/profile.json").write_text(json.dumps({"features": features}))
+            identity, _ = self.refresh()
+            self.lock(identity)
+            for command in ("list", "config-id", "configure", "verify-config"):
+                with self.subTest(features=features, command=command):
+                    result = subprocess.run(
+                        ["python3", str(Path(patchsets.__file__)), command, str(self.root), "7.2.10"],
+                        text=True, capture_output=True)
+                    needs_tree = command == "verify-config" or (command == "configure" and features)
+                    self.assertEqual(result.returncode, 2 if needs_tree else 0)
+                    if needs_tree:
+                        self.assertIn(f"{command} requires the kernel source tree argument", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_unfamiliar_bore_rebase_preserves_patch_diagnostics(self):
+        self.contents["7.2/sched/0001-bore-cachy.patch"] = self.diff("bore").replace(b"-old", b"-missing")
+        with self.assertRaisesRegex(ValueError, "unfamiliar rebase") as failure:
+            self.refresh()
+        self.assertIn("bore.txt", str(failure.exception))
+        self.assertIn("Hunk #1 FAILED", str(failure.exception))
+        self.assertFalse((self.root / "src/patches/snapshots").exists())
+
+    def test_bore_context_mismatch_preserves_patch_diagnostics(self):
+        source = self.tree / "include/linux/sched.h"
+        source.parent.mkdir(parents=True)
+        source.write_text("unfamiliar source context\n")
+        content = b"@@ -824,6 +824,31 @@ struct kmap_ctrl {\n #endif\n };\n \n"
+        with self.assertRaisesRegex(ValueError, "context fix no longer matches") as failure:
+            patchsets.adapt_bore(content, self.tree, "Hunk #1 FAILED\n")
+        self.assertIn("Hunk #1 FAILED", str(failure.exception))
+
     def test_invalid_or_duplicate_feature_policy_is_rejected(self):
         for features in (["unknown"], ["aufs", "aufs"], "aufs"):
             (self.root / "src/patches/profile.json").write_text(json.dumps({"features": features}))
@@ -201,6 +234,25 @@ class PatchsetTests(unittest.TestCase):
         download.assert_not_called()
 
     def test_new_kernel_update_downloads_pins_patches_and_records_review_inventory(self):
+        self.check_kernel_update(adapted=False)
+
+    def test_adapted_kernel_update_records_provenance_and_review_checklist(self):
+        source = self.tree / "include/linux/sched.h"
+        source.parent.mkdir(parents=True)
+        source.write_text("struct task_ipi_mask { };\n#endif\n\nstruct task_struct {\n int existing;\n};\n")
+        content = (
+            "--- a/include/linux/sched.h\n+++ b/include/linux/sched.h\n"
+            "@@ -824,6 +824,31 @@ struct kmap_ctrl {\n #endif\n };\n \n" +
+            "".join(f"+int bore_{index};\n" for index in range(25)) +
+            " struct task_struct {\n  int existing;\n };\n").encode()
+        path = "7.2/sched/0001-bore-cachy.patch"
+        self.contents[path] = content
+        self.entries[path] = {"sha": self.blob_sha(content)}
+        with tarfile.open(self.archive, "w:gz") as archive:
+            archive.add(self.tree, arcname="source")
+        self.check_kernel_update(adapted=True)
+
+    def check_kernel_update(self, adapted):
         (self.root / "src/releases.tsv").write_text("7.2.9 cachyos-7.2.9-2 " + "a" * 64 + "\n")
         (self.root / "src/default-version").write_text("7.2.9\n")
         (self.root / "src/patches/SOURCES.md").write_text("Previously validated source\n")
@@ -232,6 +284,18 @@ class PatchsetTests(unittest.TestCase):
         self.assertIn("new-optional.patch", notes)
         self.assertIn("acpi-call, aufs, handheld", notes)
         self.assertIn("Previously validated source", (self.root / "src/patches/SOURCES.md").read_text())
+        provenance = (self.root / "src/patches/SOURCES.md").read_text()
+        if adapted:
+            description = "`0001-bore-cachy.patch` (task_ipi_mask context only)"
+            self.assertIn(description, provenance)
+            self.assertIn(description, notes)
+            self.assertIn("- [ ] Review each adaptation against the upstream patch.", notes)
+            bore = metadata["patches"][0]
+            self.assertNotEqual(bore["sha256"], bore["upstream_sha256"])
+        else:
+            self.assertNotIn("Local patch adaptations", provenance)
+            self.assertNotIn("Locally adapted patches", notes)
+            self.assertNotIn("Review each adaptation", notes)
 
     def test_failed_archive_download_preserves_cached_archive(self):
         before = self.archive.read_bytes()

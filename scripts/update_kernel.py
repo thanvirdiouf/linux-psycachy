@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import urllib.request
 
@@ -130,6 +131,12 @@ def archive_hash(candidate, destination=None):
             partial.unlink(missing_ok=True)
 
 
+def adaptations(metadata):
+    """Describe patches the updater modified relative to upstream."""
+    return [f"`{item['name']}` ({item['adaptation']})"
+            for item in (metadata or {}).get("patches", []) if item.get("adaptation")]
+
+
 def apply_candidate(root, candidate, digest, snapshot=None, metadata=None):
     version, tag = candidate["version"], candidate["release"]
     patch = root / f"src/patches/{version.rsplit('.', 1)[0]}/0001-bore-cachy.patch"
@@ -147,6 +154,7 @@ def apply_candidate(root, candidate, digest, snapshot=None, metadata=None):
         patchsets.verify_snapshot(root, snapshot)
         locks[version] = {"source_sha256": digest, "snapshot": snapshot}
     # Validate and prepare all contents before modifying tracked files.
+    adapted = adaptations(metadata) if snapshot else []
     manifest_text = manifest.read_text().rstrip("\n") + f"\n{version}\t{tag}\t{digest}\n"
     notes = provenance.read_text().rstrip("\n") + (
         f"\n\n## Candidate source: Linux {version}\n\n"
@@ -154,7 +162,8 @@ def apply_candidate(root, candidate, digest, snapshot=None, metadata=None):
         f"- Archive SHA-256: `{digest}`\n" +
         (f"- Patch snapshot: `{snapshot}`\n"
          f"- Upstream patch commit: `{metadata['upstream_commit']}`\n"
-         f"- Optional features: {', '.join(metadata['features']) or 'none'}.\n\n"
+         f"- Optional features: {', '.join(metadata['features']) or 'none'}.\n" +
+         (f"- Local patch adaptations: {', '.join(adapted)}.\n" if adapted else "") + "\n"
          if snapshot else "- Reuses the series BORE patch and shared Debian headers patch.\n\n") +
         "Registered by the updater. Compilation and boot validation must be reviewed\n"
         "before describing this version as validated.\n")
@@ -203,6 +212,12 @@ def main():
             "- [ ] Confirm package compilation and checksum verification succeeded.\n"
             "- [ ] Install and boot-test the packages, including hardware and DKMS modules.\n\n"
             "Merge after validation. GitHub Release publication remains manual.\n")
+        adapted = adaptations(metadata)
+        if adapted:
+            with notes.open("a") as stream:
+                stream.write("\nLocally adapted patches (these differ from upstream):\n\n")
+                stream.writelines(f"- {item}\n" for item in adapted)
+                stream.write("\n- [ ] Review each adaptation against the upstream patch.\n")
         selected = {item['upstream_path'] for item in metadata['patches'] if item['upstream_path']}
         unselected = sorted(set(metadata['upstream_paths']) - selected)
         if unselected:
@@ -215,5 +230,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError) as error:
-        raise SystemExit(str(error))
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"Missing expected key: {error}" if isinstance(error, KeyError) else str(error))
