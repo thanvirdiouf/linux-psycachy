@@ -51,8 +51,8 @@ class BuilderTests(unittest.TestCase):
         (self.repo / "build.sh").write_text(BUILDER.read_text())
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts/patchsets.py").write_text(Path(patchsets.__file__).read_text())
-        for name in ("package_nvidia.py", "install-packages.sh"):
-            shutil.copyfile(BUILDER.parent / "scripts" / name, self.repo / "scripts" / name)
+        for name in ("package_nvidia.py", "install-packages.sh", "psycachy-ld"):
+            shutil.copy2(BUILDER.parent / "scripts" / name, self.repo / "scripts" / name)
         shutil.copytree(BUILDER.parent / "packaging", self.repo / "packaging")
         shutil.copyfile(BUILDER.parent / "LICENSE", self.repo / "LICENSE")
 
@@ -74,6 +74,7 @@ class BuilderTests(unittest.TestCase):
         self.executable(binaries / "uname", "echo x86_64")
         self.executable(binaries / "nproc", 'echo "${TEST_CPUS:-8}"')
         self.executable(binaries / "sudo", "echo 'Unexpected dependency installation' >&2; exit 99")
+        self.executable(binaries / "ccache", 'exec "$@"')
         self.executable(
             binaries / "make",
             'echo "$*" >> "$BUILD_LOG"\n'
@@ -90,7 +91,8 @@ class BuilderTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}",
                         BUILD_LOG=str(self.log), CONFIG_LOG=str(self.config_log))
         self.env["TOOLCHAIN"] = "gcc"
-        for name in ("LLVM_VERSION", "LLVM", "LLVM_IAS"):
+        for name in ("LLVM_VERSION", "LLVM", "LLVM_IAS", "BUILD_CACHE", "THINLTO_TUNING",
+                     "MODULE_LINK_JOBS", "KERNEL_LINK_JOBS", "KBUILD_BUILD_TIMESTAMP"):
             self.env.pop(name, None)
         self.env.pop("JOBS", None)
         self.env.pop("PAHOLE", None)
@@ -176,6 +178,32 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("JOBS must be a positive integer", result.stdout)
         self.assertFalse(self.log.exists())
         self.assertFalse((self.repo / "src" / "build-7.2.9").exists())
+
+    def test_invalid_cache_and_link_limits_stop_before_preparation(self):
+        for setting in ({'BUILD_CACHE': 'yes'}, {'THINLTO_TUNING': '2'},
+                        {'MODULE_LINK_JOBS': '0'}, {'KERNEL_LINK_JOBS': '-1'}):
+            with self.subTest(setting=setting):
+                result = self.run_builder('7.2.9', **setting)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.log.exists())
+
+    def test_cache_and_thread_settings_reach_all_make_stages(self):
+        result = self.run_builder('7.2.9', '--prepare-only', TOOLCHAIN='', BUILD_CACHE='1',
+                                  KBUILD_BUILD_TIMESTAMP='Thu, 01 Jan 1970 00:00:00 +0000',
+                                  MODULE_LINK_JOBS='2', KERNEL_LINK_JOBS='6')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.log.read_text().splitlines()
+        self.assertTrue(all('CC=ccache clang-18' in call and 'LD=psycachy-ld' in call for call in calls))
+        tuning = (self.repo / 'src/build-7.2.9-clang-thinlto/BUILD-TUNING.txt').read_text()
+        self.assertIn('Module link jobs: 2', tuning)
+        self.assertIn('Kernel link jobs: 6', tuning)
+        self.assertTrue((self.repo / '.cache/ccache').is_dir())
+        self.assertTrue((self.repo / '.cache/thinlto').is_dir())
+
+    def test_baseline_switch_uses_unwrapped_linker(self):
+        result = self.run_builder('7.2.9', '--prepare-only', TOOLCHAIN='', THINLTO_TUNING='0')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('LD=psycachy-ld', self.log.read_text())
 
     def test_rejects_corrupt_archive(self):
         archive = self.repo / "src" / "cachyos-7.2.9-2.tar.gz"

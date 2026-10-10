@@ -70,6 +70,22 @@ if [[ ! $jobs =~ ^[1-9][0-9]*$ ]]; then
     echo "JOBS must be a positive integer." >&2
     exit 1
 fi
+build_cache=${BUILD_CACHE:-0}
+thinlto_tuning=${THINLTO_TUNING:-1}
+for setting in build_cache thinlto_tuning; do
+    if [[ ${!setting} != 0 && ${!setting} != 1 ]]; then
+        echo "BUILD_CACHE and THINLTO_TUNING must be 0 or 1." >&2
+        exit 1
+    fi
+done
+module_link_jobs=${MODULE_LINK_JOBS:-1}
+kernel_link_jobs=${KERNEL_LINK_JOBS:-$jobs}
+for setting in module_link_jobs kernel_link_jobs; do
+    if [[ ! ${!setting} =~ ^[1-9][0-9]*$ ]]; then
+        echo "MODULE_LINK_JOBS and KERNEL_LINK_JOBS must be positive integers." >&2
+        exit 1
+    fi
+done
 
 archive="$repo_dir/src/$source_release.tar.gz"
 toolchain=${TOOLCHAIN:-clang-thinlto}
@@ -111,6 +127,9 @@ dependencies=(build-essential bc bison flex libssl-dev libelf-dev libdw-dev libn
     pkg-config python3 perl openssl curl zstd xz-utils)
 if [[ $toolchain == clang-thinlto ]]; then
     dependencies+=("clang-$llvm_version" "lld-$llvm_version" "llvm-$llvm_version")
+fi
+if [[ $build_cache == 1 ]]; then
+    dependencies+=(ccache git)
 fi
 if [[ ${2:-} != --prepare-only ]]; then
     dependencies+=(git cpio kmod rsync fakeroot debhelper)
@@ -156,6 +175,40 @@ if [[ -f $build_dir/.psycachy-toolchain && $(<"$build_dir/.psycachy-toolchain") 
     exit 1
 fi
 printf '%s\n' "$toolchain_info"
+
+# Keep upstream Kbuild linker flags intact: the wrapper adds only resource/cache
+# options, including for intermediate module links where ThinLTO also runs.
+if [[ $toolchain == clang-thinlto && ( $thinlto_tuning == 1 || $build_cache == 1 ) ]]; then
+    export PATH="$repo_dir/scripts:$PATH"
+    export PSYCACHY_REAL_LD="$(command -v "ld.lld-$llvm_version")"
+    export PSYCACHY_MODULE_LINK_JOBS="$module_link_jobs"
+    export PSYCACHY_KERNEL_LINK_JOBS="$kernel_link_jobs"
+    export PSYCACHY_THINLTO_TUNING="$thinlto_tuning"
+    if [[ $build_cache == 1 ]]; then
+        export PSYCACHY_THINLTO_CACHE="$repo_dir/.cache/thinlto"
+        mkdir -p "$PSYCACHY_THINLTO_CACHE"
+    else
+        unset PSYCACHY_THINLTO_CACHE
+    fi
+    make_args+=(LD=psycachy-ld)
+fi
+if [[ $build_cache == 1 ]]; then
+    command -v ccache >/dev/null || { echo "Required tool is missing: ccache" >&2; exit 1; }
+    export CCACHE_DIR="$repo_dir/.cache/ccache" CCACHE_BASEDIR="$repo_dir"
+    export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=2Gi
+    mkdir -p "$CCACHE_DIR"
+    if [[ $toolchain == clang-thinlto ]]; then
+        make_args+=("CC=ccache clang-$llvm_version")
+    else
+        make_args+=("CC=ccache gcc")
+    fi
+    # Avoid wall-clock build timestamps defeating cache reuse. Respect explicit
+    # timestamps supplied by the caller; use the source commit otherwise.
+    if [[ ! ${KBUILD_BUILD_TIMESTAMP+x} ]]; then
+        KBUILD_BUILD_TIMESTAMP=$(git -C "$repo_dir" show -s --format=%cD HEAD)
+        export KBUILD_BUILD_TIMESTAMP
+    fi
+fi
 
 # A completed preparation can be reused after an interrupted compilation.
 patch_fingerprint=$(
@@ -213,6 +266,11 @@ fi
 cd -- "$build_dir"
 printf '%s\n' "$toolchain_id" > .psycachy-toolchain
 printf '%s\n' "$toolchain_info" > TOOLCHAIN.txt
+effective_thinlto_tuning=0
+if [[ $toolchain == clang-thinlto ]]; then effective_thinlto_tuning=$thinlto_tuning; fi
+printf 'Compiler cache: %s\nThinLTO tuning: %s\nMake jobs: %s\nModule link jobs: %s\nKernel link jobs: %s\nBuild timestamp: %s\n' \
+    "$build_cache" "$effective_thinlto_tuning" "$jobs" "$module_link_jobs" "$kernel_link_jobs" \
+    "${KBUILD_BUILD_TIMESTAMP-automatic}" > BUILD-TUNING.txt
 cp -- "$repo_dir/src/config" .config
 if [[ $locked_patches == 1 ]]; then
     python3 "$repo_dir/scripts/patchsets.py" configure "$repo_dir" "$version" "$build_dir"

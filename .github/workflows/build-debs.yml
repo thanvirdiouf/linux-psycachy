@@ -96,7 +96,7 @@ jobs:
       - name: Check shell syntax and run regression tests
         shell: bash
         run: |
-          for script in build.sh scripts/install-packages.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
+          for script in build.sh scripts/psycachy-ld scripts/install-packages.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
             bash -n "$script"
           done
           python3 -m unittest discover -s tests -v
@@ -108,6 +108,10 @@ jobs:
     timeout-minutes: 330
     env:
       KERNEL_VERSION: ${{ needs.validate.outputs.kernel-version }}
+      BUILD_CACHE: '1'
+      MODULE_LINK_JOBS: '1'
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: github-runner
     outputs:
       artifact-id: ${{ steps.packages.outputs.artifact-id }}
     defaults:
@@ -129,9 +133,40 @@ jobs:
           fi
           df -h .
 
+      - name: Set reproducible build identity
+        run: |
+          printf 'KBUILD_BUILD_TIMESTAMP=%s\n' "$(git show -s --format=%cD HEAD)" >> "$GITHUB_ENV"
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+          printf 'LLVM_VERSION=%s\n' "$(<src/llvm-version)" >> "$GITHUB_ENV"
+
       - name: Prepare sources and install build dependencies
+        env:
+          BUILD_CACHE: '0'
         run: |
           ./build.sh "$KERNEL_VERSION" --prepare-only 2>&1 | tee build.log
+
+      - name: Install compiler cache and identify cache compatibility
+        id: cache-settings
+        run: |
+          sudo apt-get install -y ccache
+          fingerprint=$(
+            {
+              sha256sum "$(command -v "clang-$LLVM_VERSION")" "$(command -v "ld.lld-$LLVM_VERSION")"
+              ccache --version
+            } | sha256sum | cut -d ' ' -f1
+          )
+          printf 'prefix=%s-%s-llvm%s-%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$LLVM_VERSION" "$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiler and ThinLTO caches
+        id: cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/ccache
+            .cache/thinlto
+          key: kernel-cache-v1-${{ steps.cache-settings.outputs.prefix }}-${{ env.KERNEL_VERSION }}-${{ env.BUILD_COMMIT }}
+          restore-keys: |
+            kernel-cache-v1-${{ steps.cache-settings.outputs.prefix }}-
 
       - name: Configure a build without debug information
         run: |
@@ -148,7 +183,25 @@ jobs:
       - name: Compile and package the kernel
         run: |
           export JOBS="$(nproc)"
-          ./build.sh "$KERNEL_VERSION" 2>&1 | tee -a build.log
+          export KERNEL_LINK_JOBS="$JOBS"
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.cache/ccache"
+          ccache --zero-stats
+          python3 scripts/measure_build.py --output diagnostics/kernel -- \
+            ./build.sh "$KERNEL_VERSION" 2>&1 | tee -a build.log
+
+      - name: Report resource usage and compiler cache statistics
+        if: always()
+        run: |
+          if [[ -f diagnostics/kernel/summary.md ]]; then
+            cat diagnostics/kernel/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if command -v ccache >/dev/null; then
+            mkdir -p diagnostics
+            CCACHE_DIR="$GITHUB_WORKSPACE/.cache/ccache" ccache --show-stats --verbose | tee diagnostics/ccache.txt
+            printf '\n### Compiler cache\n\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+            cat diagnostics/ccache.txt >> "$GITHUB_STEP_SUMMARY"
+            printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Verify and collect Debian packages
         run: |
@@ -173,6 +226,7 @@ jobs:
           fi
           cp "src/build-$KERNEL_VERSION-clang-thinlto/.config" dist/kernel.config
           cp "src/build-$KERNEL_VERSION-clang-thinlto/TOOLCHAIN.txt" dist/TOOLCHAIN.txt
+          cp "src/build-$KERNEL_VERSION-clang-thinlto/BUILD-TUNING.txt" dist/BUILD-TUNING.txt
           cp src/install-packages.sh dist/install-packages.sh
           python3 - "$KERNEL_VERSION" <<'PY'
           import json, pathlib, shutil, sys
@@ -189,6 +243,15 @@ jobs:
         run: |
           python3 scripts/validate_nvidia.py --packages dist
           cat dist/NVIDIA-VALIDATION.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save compiler and ThinLTO caches
+        if: github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/ccache
+            .cache/thinlto
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Upload Debian packages
         id: packages
@@ -207,10 +270,12 @@ jobs:
           name: psycachy-build-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build.log
+            diagnostics/
             dist/nvidia-build.log
             dist/NVIDIA-VALIDATION.txt
             src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/.config
             src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/TOOLCHAIN.txt
+            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/BUILD-TUNING.txt
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14

@@ -97,6 +97,26 @@ To limit compilation parallelism:
 JOBS=4 ./build.sh 7.2.9
 ```
 
+Clang builds limit each module link to one worker to avoid multiplying linker
+threads across parallel make jobs. The main kernel link uses `JOBS` workers.
+Override these independently with `MODULE_LINK_JOBS` and `KERNEL_LINK_JOBS`;
+set `THINLTO_TUNING=0` to compare against the linker's default parallelism.
+These controls preserve Kbuild's optimization and module linker flags.
+
+Enable persistent compiler and ThinLTO caches for repeated builds:
+
+```sh
+BUILD_CACHE=1 JOBS=4 ./build.sh 7.2.9
+```
+
+This installs `ccache` when needed and stores caches in `.cache/ccache` and
+`.cache/thinlto`, with a 2 GiB size target for each. ThinLTO pruning runs at most
+once a minute, so its cache can temporarily exceed that target. Cached builds
+use the Git commit timestamp unless `KBUILD_BUILD_TIMESTAMP` is supplied.
+Compiler contents, inputs and flags determine cache validity. The first build
+starts with an empty cache; changes to source or configuration can reduce reuse.
+`BUILD-TUNING.txt` records the selected resource controls.
+
 To build with GCC without LTO instead:
 
 ```sh
@@ -188,6 +208,14 @@ the kernel/NVIDIA build logs and configuration, including when compilation fails
 CI builds omit debug information, BTF, and sched_ext to fit standard runners.
 They use Clang/LLVM with ThinLTO, retain generic x86-64 support, and use
 `genksyms` for module versioning.
+CI restores compiler and ThinLTO caches compatible with the installed LLVM
+toolchain and saves them after successful builds and NVIDIA validation. Pull
+requests can restore caches but do not save them. The run summary includes
+compiler cache statistics and sampled CPU, available RAM, swap and I/O wait.
+The diagnostic artifact contains `resources.csv`, `summary.json` and GNU time
+output. Memory samples are host-wide; GNU time's maximum RSS is per process,
+not total memory used by all compiler and linker jobs. Use these measurements
+to compare runs before increasing job counts or changing the configuration.
 Local builds use `src/config` with the builder's compatibility adjustments.
 
 ### Publish a release
