@@ -118,6 +118,39 @@ def adapt_bore(content, tree, details=""):
     return text.replace(old, new, 1).encode()
 
 
+def adapt_handheld(content, tree, details=""):
+    """Preserve the 7.2.10 millipercent declaration in backlight hunk context."""
+    text = content.decode()
+    failure = f":\n{details.strip()}" if details.strip() else ""
+    path = "drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c"
+    marker = f"diff --git a/{path} b/{path}\n"
+    old = (
+        "@@ -5419,6 +5431,7 @@ static void amdgpu_dm_backlight_set_level(struct amdgpu_display_manager *dm,\n"
+        " \tstruct amdgpu_dm_backlight_caps *caps;\n"
+        " \tstruct dc_link *link;\n"
+        " \tu32 brightness = 0;\n"
+        "+\tu32 prev_brightness;\n"
+        " \tbool rc = false, reallow_idle = false;\n"
+        " \tstruct drm_connector *connector;\n"
+        " \tstruct dc_stream_state *stream;\n"
+    )
+    source = tree / path
+    if text.count(marker) != 1 or not source.is_file():
+        raise ValueError("Handheld needs an unfamiliar rebase; review its failing hunks manually" + failure)
+    start = text.index(marker)
+    end = text.find("\ndiff --git ", start + len(marker))
+    end = len(text) if end == -1 else end
+    section = text[start:end]
+    if section.count(old) != 1:
+        raise ValueError("Handheld needs an unfamiliar rebase; review its failing hunks manually" + failure)
+    new = old.replace("-5419,6 +5431,7", "-5419,7 +5431,8").replace(
+        "+\tu32 prev_brightness;\n", "+\tu32 prev_brightness;\n \tu32 millipercent = 0;\n")
+    context = "".join(line[1:] for line in new.splitlines(keepends=True) if line.startswith(" "))
+    if source.read_text().count(context) != 1:
+        raise ValueError("Handheld context fix no longer matches the source; manual review required" + failure)
+    return (text[:start] + section.replace(old, new, 1) + text[end:]).encode()
+
+
 def store_snapshot(root, metadata, contents):
     identity = hashlib.sha256(canonical(metadata)).hexdigest()
     target = root / "src/patches/snapshots" / identity
@@ -195,6 +228,11 @@ def refresh(root, candidate, archive):
                 content = adapt_bore(content, tree, result.stdout + result.stderr)
                 patch.write_bytes(content)
                 adaptation = "task_ipi_mask context only"
+                result = apply_patch(tree, patch, dry_run=True)
+            if result.returncode and name == "0004-handheld.patch":
+                content = adapt_handheld(content, tree, result.stdout + result.stderr)
+                patch.write_bytes(content)
+                adaptation = "amdgpu_dm millipercent declaration context only"
                 result = apply_patch(tree, patch, dry_run=True)
             if result.returncode:
                 raise ValueError(f"Patch preparation failed for {name}:\n{result.stdout}\n{result.stderr}")

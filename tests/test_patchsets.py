@@ -168,6 +168,66 @@ class PatchsetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unfamiliar rebase"):
             patchsets.adapt_bore(b"different upstream hunk", self.tree)
 
+    def handheld_fixture(self):
+        path = "drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c"
+        context = (
+            "\tstruct amdgpu_dm_backlight_caps *caps;\n"
+            "\tstruct dc_link *link;\n"
+            "\tu32 brightness = 0;\n"
+            "\tbool rc = false, reallow_idle = false;\n"
+            "\tstruct drm_connector *connector;\n"
+            "\tstruct dc_stream_state *stream;\n"
+        )
+        content = (
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            "@@ -5419,6 +5431,7 @@ static void amdgpu_dm_backlight_set_level(struct amdgpu_display_manager *dm,\n"
+            + "".join(" " + line for line in context.splitlines(keepends=True))
+        ).replace(" \tu32 brightness = 0;\n", " \tu32 brightness = 0;\n+\tu32 prev_brightness;\n").encode()
+        source = self.tree / path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(context.replace("\tu32 brightness = 0;\n",
+                                          "\tu32 brightness = 0;\n\tu32 millipercent = 0;\n"))
+        return content, source
+
+    def test_handheld_context_rebase_applies_and_records_provenance(self):
+        content, source = self.handheld_fixture()
+        self.contents["7.2/misc/0001-handheld.patch"] = content
+        with tarfile.open(self.archive, "w:gz") as archive:
+            archive.add(self.tree, arcname="source")
+        identity, metadata = self.refresh()
+        folder, _ = patchsets.verify_snapshot(self.root, identity)
+        adapted = folder / "0004-handheld.patch"
+        self.assertEqual([line for line in content.splitlines() if line.startswith((b"+", b"-"))],
+                         [line for line in adapted.read_bytes().splitlines() if line.startswith((b"+", b"-"))])
+        self.assertEqual(patchsets.apply_patch(self.tree, adapted).returncode, 0)
+        self.assertIn("\tu32 prev_brightness;\n\tu32 millipercent = 0;", source.read_text())
+        entry = next(item for item in metadata["patches"] if item["name"] == "0004-handheld.patch")
+        self.assertEqual(entry["adaptation"], "amdgpu_dm millipercent declaration context only")
+        self.assertEqual(entry["upstream_sha256"], hashlib.sha256(content).hexdigest())
+        self.assertNotEqual(entry["sha256"], entry["upstream_sha256"])
+
+    def test_handheld_rebase_rejects_unfamiliar_context_with_diagnostics(self):
+        content, source = self.handheld_fixture()
+        details = "Hunk #4 FAILED at 5431."
+        for changed in (content.replace(b"prev_brightness", b"other_brightness"),
+                        content.replace(b"amdgpu_dm.c", b"other.c")):
+            with self.assertRaisesRegex(ValueError, "unfamiliar rebase") as failure:
+                patchsets.adapt_handheld(changed, self.tree, details)
+            self.assertIn(details, str(failure.exception))
+        source.write_text(source.read_text().replace("millipercent = 0", "millipercent = 1"))
+        with self.assertRaisesRegex(ValueError, "no longer matches") as failure:
+            patchsets.adapt_handheld(content, self.tree, details)
+        self.assertIn(details, str(failure.exception))
+
+    def test_handheld_other_conflict_still_prevents_snapshot_creation(self):
+        content, _ = self.handheld_fixture()
+        self.contents["7.2/misc/0001-handheld.patch"] = content + self.diff("handheld").replace(b"-old", b"-missing")
+        with tarfile.open(self.archive, "w:gz") as archive:
+            archive.add(self.tree, arcname="source")
+        with self.assertRaisesRegex(ValueError, "Patch preparation failed"):
+            self.refresh()
+        self.assertFalse((self.root / "src/patches/snapshots").exists())
+
     def test_optional_configuration_is_checked_after_olddefconfig(self):
         identity, metadata = self.refresh()
         self.lock(identity)
