@@ -1,0 +1,75 @@
+{
+  "config": {
+    "ACPI_CALL": "m",
+    "AUFS_FS": "m",
+    "EXTCON_STEAMDECK": "m",
+    "HID_ASUS_ALLY": "m",
+    "HID_MSI": "m",
+    "LEDS_STEAMDECK": "m",
+    "LEDS_VALVE": "m",
+    "MFD_STEAMDECK": "m",
+    "SENSORS_STEAMDECK": "m",
+    "SND_SOC_AW87XXX": "m",
+    "ZOTAC_ZONE_HID": "m",
+    "ZOTAC_ZONE_PLATFORM": "m"
+  },
+  "features": [
+    "acpi-call",
+    "aufs",
+    "handheld"
+  ],
+  "patches": [
+    {
+      "adaptation": "task_ipi_mask context only",
+      "name": "0001-bore-cachy.patch",
+      "sha256": "4a0bf619cec2107e81620e5fb41b705c882d3bee12b36721c5ab14df3821e30c",
+      "upstream_path": "7.2/sched/0001-bore-cachy.patch",
+      "upstream_sha256": "1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf105affd24a0"
+    },
+    {
+      "adaptation": null,
+      "name": "0002-acpi-call.patch",
+      "sha256": "acd2ed34838556809839398a91a8fae99261b13a04c5f4cf34cbc03d1011fe6a",
+      "upstream_path": "7.2/misc/0001-acpi-call.patch",
+      "upstream_sha256": "acd2ed34838556809839398a91a8fae99261b13a04c5f4cf34cbc03d1011fe6a"
+    },
+    {
+      "adaptation": null,
+      "name": "0003-aufs.patch",
+      "sha256": "7d35ffce0aa6383a7c570b7cf5086c94f724511213c73b02e8ebec7c6c78c1dc",
+      "upstream_path": "7.2/misc/0001-aufs-7.2-merge-v20260914.patch",
+      "upstream_sha256": "7d35ffce0aa6383a7c570b7cf5086c94f724511213c73b02e8ebec7c6c78c1dc"
+    },
+    {
+      "adaptation": "amdgpu_dm millipercent declaration context only",
+      "name": "0004-handheld.patch",
+      "sha256": "c851b9b235e86f8ef945d99fd5dfec8d48cfeb500133885ffdbe701387bedc9b",
+      "upstream_path": "7.2/misc/0001-handheld.patch",
+      "upstream_sha256": "4ce1b36e58dadc8d8e0de523102944f42ff5f65ddbdbeef62b56fd8c3eef70aa"
+    },
+    {
+      "adaptation": null,
+      "name": "0009-debian-headers-config.patch",
+      "sha256": "5845f4fa5270035c4dae90a285125cbf36ad6fbc7d6bf980e2a69ced1777ca8a",
+      "upstream_path": null,
+      "upstream_sha256": "5845f4fa5270035c4dae90a285125cbf36ad6fbc7d6bf980e2a69ced1777ca8a"
+    }
+  ],
+  "upstream_commit": "17bb0bb818d283d0dc6e0280a2e9d5b95e66808b",
+  "upstream_paths": [
+    "7.2/misc/0001-acpi-call.patch",
+    "7.2/misc/0001-aufs-7.2-merge-v20260914.patch",
+    "7.2/misc/0001-handheld.patch",
+    "7.2/misc/0001-hardened.patch",
+    "7.2/misc/0001-rt-i915.patch",
+    "7.2/misc/dkms-clang.patch",
+    "7.2/misc/nvidia/0001-make-Add-support-for-7.2-Kernel.patch",
+    "7.2/misc/nvidia/0002-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch",
+    "7.2/misc/nvidia/0003-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch",
+    "7.2/sched-dev/0001-bore-cachy.patch",
+    "7.2/sched/0001-bore-cachy.patch",
+    "7.2/sched/0001-bore.patch",
+    "7.2/sched/0001-muqss-cachy.patch",
+    "7.2/sched/0001-prjc-cachy.patch"
+  ]
+}

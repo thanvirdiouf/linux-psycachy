@@ -1,4 +1,8 @@
 {
+  "7.2.10": {
+    "snapshot": "c3a5ac872ccd8404426b5ad3f1daaef82e145723f3902530a9a454bc0af9b2c8",
+    "source_sha256": "02af8a6115596d20e9998926953f2040f8d7f66ca1122f399c5920a9601f1cef"
+  },
   "7.2.9": {
     "snapshot": "7a6bcd1b12ba932ec7bd51ddf195004396af42d92ff8f67fd71805e1fd37abbb",
     "source_sha256": "2da9e6ffe31436657f46909db059059946dac22c2ac6cde05e49a66d61acfcba"
