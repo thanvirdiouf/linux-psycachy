@@ -67,3 +67,15 @@ The automatic trigger remains a newer Linux version in the selected series.
 Patch-only commits and same-version source revisions do not trigger an update
 build. New kernel series still require deliberate adoption and compatibility
 review. Compilation and boot validation remain necessary before publication.
+
+## Candidate source: Linux 7.2.10
+
+- [CachyOS source release](https://github.com/CachyOS/linux/releases/tag/cachyos-7.2.10-1)
+- Archive SHA-256: `02af8a6115596d20e9998926953f2040f8d7f66ca1122f399c5920a9601f1cef`
+- Patch snapshot: `c3a5ac872ccd8404426b5ad3f1daaef82e145723f3902530a9a454bc0af9b2c8`
+- Upstream patch commit: `17bb0bb818d283d0dc6e0280a2e9d5b95e66808b`
+- Optional features: acpi-call, aufs, handheld.
+- Local patch adaptations: `0001-bore-cachy.patch` (task_ipi_mask context only), `0004-handheld.patch` (amdgpu_dm millipercent declaration context only).
+
+Registered by the updater. Compilation and boot validation must be reviewed
+before describing this version as validated.
