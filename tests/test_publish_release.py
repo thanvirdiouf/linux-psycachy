@@ -19,6 +19,42 @@ RUN_ID = 123456
 SOURCE = "a" * 40
 
 
+class ReleaseLookupTests(unittest.TestCase):
+    def test_published_release_is_found_by_tag_without_listing(self):
+        gh = Mock()
+        release = {"id": 12, "tag_name": "v1", "draft": False}
+        gh.api.return_value = release
+        self.assertEqual(publisher.find_release(gh, "v1"), release)
+        gh.api.assert_called_once_with("releases/tags/v1", missing_ok=True)
+
+    def test_draft_is_found_on_later_listing_page(self):
+        gh = Mock()
+        draft = {"id": 12, "tag_name": "v1", "draft": True}
+        gh.api.side_effect = [None, [{"tag_name": f"other-{i}"} for i in range(100)], [draft]]
+        self.assertEqual(publisher.find_release(gh, "v1"), draft)
+        self.assertEqual([call.args[0] for call in gh.api.call_args_list],
+                         ["releases/tags/v1", "releases?per_page=100&page=1",
+                          "releases?per_page=100&page=2"])
+
+    def test_missing_release_returns_none_after_last_listing_page(self):
+        gh = Mock()
+        gh.api.side_effect = [None, []]
+        self.assertIsNone(publisher.find_release(gh, "v1"))
+
+    def test_ambiguous_drafts_are_rejected(self):
+        gh = Mock()
+        gh.api.side_effect = [None, [{"tag_name": "v1", "id": i} for i in (12, 13)]]
+        with self.assertRaisesRegex(ValueError, "Multiple releases"):
+            publisher.find_release(gh, "v1")
+
+    def test_lookup_error_is_not_treated_as_missing_release(self):
+        gh = Mock()
+        gh.api.side_effect = ValueError("HTTP 403")
+        with self.assertRaisesRegex(ValueError, "HTTP 403"):
+            publisher.find_release(gh, "v1")
+        self.assertEqual(gh.api.call_count, 1)
+
+
 class ReleaseFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="psycachy-release-test-")
@@ -252,6 +288,10 @@ class PromotionTests(ReleaseFixture):
             self.existing_release["published_at"] = "2026-10-17T10:00:00Z"
             self.existing_tag = {"object": {"type": "commit", "sha": SOURCE}}
             return self.existing_release
+        if path == "releases/13579" and method == "GET":
+            return self.existing_release
+        if path.startswith("releases?per_page=100&page="):
+            return [self.existing_release] if self.existing_release else []
         if path.split("?")[0] == f"actions/runs/{RUN_ID}":
             return self.run
         if path.split("?")[0] == f"actions/runs/{RUN_ID}/artifacts":
@@ -264,7 +304,12 @@ class PromotionTests(ReleaseFixture):
         if path.startswith("git/ref/tags/"):
             return self.existing_tag
         if path.startswith("releases/tags/"):
-            return self.existing_release
+            # GitHub's tag endpoint returns published releases, not drafts.
+            if self.existing_release and not self.existing_release["draft"]:
+                return self.existing_release
+            if not missing_ok:
+                raise ValueError("GitHub API failed: gh: Not Found (HTTP 404)")
+            return None
         if path.startswith("commits/"):
             return {"sha": SOURCE}
         if path.startswith("compare/"):
@@ -347,6 +392,19 @@ class PromotionTests(ReleaseFixture):
         self.assertEqual(self.gh.command.call_count, len(list(self.bundle_path.iterdir())) - 1)
         self.assertNotIn(uploaded_name, [Path(call.args[3]).name for call in self.gh.command.call_args_list])
         self.assertFalse(any(call.kwargs.get("method") == "POST" for call in self.gh.api.call_args_list))
+
+    def test_fully_uploaded_draft_is_published_without_new_release_or_uploads(self):
+        self.existing_release = self.release(draft=True)
+        result = self.promote(dry_run=False)
+        self.assertEqual(result["status"], "published")
+        self.gh.command.assert_not_called()
+        self.assertFalse(any(call.kwargs.get("method") == "POST"
+                             for call in self.gh.api.call_args_list))
+
+    def test_draft_dry_run_uses_existing_release_without_mutation(self):
+        self.existing_release = self.release(draft=True)
+        self.assertEqual(self.promote()["status"], "would_resume")
+        self.assert_no_mutation()
 
     def test_run_rerun_during_verification_stops_before_mutation(self):
         reads = 0

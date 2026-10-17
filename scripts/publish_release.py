@@ -181,6 +181,24 @@ def verify_tag(gh, tag, commit):
     return True
 
 
+def find_release(gh, tag):
+    # The tag endpoint only returns published releases. Authenticated release
+    # listings also include drafts, which may not have a Git tag yet.
+    release = gh.api(f"releases/tags/{tag}", missing_ok=True)
+    if release is not None:
+        return release
+    page = 1
+    while True:
+        releases = gh.api(f"releases?per_page=100&page={page}")
+        matches = [item for item in releases if item["tag_name"] == tag]
+        require(len(matches) <= 1, "Multiple releases have the requested tag")
+        if matches:
+            return matches[0]
+        if len(releases) < 100:
+            return None
+        page += 1
+
+
 def verify_assets(gh, tag, release, expected, allow_missing=False):
     uploaded = {asset["name"]: asset for asset in release["assets"]}
     require(len(uploaded) == len(release["assets"]) and uploaded.keys() <= expected.keys(),
@@ -245,7 +263,7 @@ def promote(repo, run_id, dry_run=False):
         expected = verify_packages(dist, version, commit, run_id)
         verify_source(gh, run, version, commit, dist)
         tag_exists = verify_tag(gh, tag, commit)
-        release = gh.api(f"releases/tags/{tag}", missing_ok=True)
+        release = find_release(gh, tag)
         if release:
             require(release["tag_name"] == tag and not release["prerelease"], "Unexpected release identity")
             require(tag_exists or (release["draft"] and release["target_commitish"] == commit),
@@ -272,7 +290,9 @@ def promote(repo, run_id, dry_run=False):
         release_id = release["id"]
         for name in sorted(missing):
             gh.command("release", "upload", tag, dist / name, "--repo", repo)
-        release = gh.api(f"releases/tags/{tag}")
+        # Retain the release ID from discovery/creation: drafts cannot be read
+        # through the published-release-by-tag endpoint.
+        release = gh.api(f"releases/{release_id}")
         verify_assets(gh, tag, release, expected)
         verify_tag(gh, tag, commit)
         require(release["id"] == release_id and release["draft"] and not release["prerelease"]
@@ -282,8 +302,9 @@ def promote(repo, run_id, dry_run=False):
         verify_run(gh, latest)
         require(latest["run_attempt"] == attempt, "Source run attempt changed during upload")
         gh.api(f"releases/{release['id']}", method="PATCH", fields={"draft": False, "make_latest": "true"})
-        release = gh.api(f"releases/tags/{tag}")
-        require(not release["draft"] and release["published_at"], "Release was not published")
+        release = gh.api(f"releases/{release_id}")
+        require(release["id"] == release_id and release["tag_name"] == tag
+                and not release["draft"] and release["published_at"], "Release was not published")
         require(verify_tag(gh, tag, commit), "Published release has no source tag")
         verify_assets(gh, tag, release, expected)
         return {"status": "published", "url": release["html_url"], "tag": tag,
