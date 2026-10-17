@@ -79,3 +79,15 @@ review. Compilation and boot validation remain necessary before publication.
 
 Registered by the updater. Compilation and boot validation must be reviewed
 before describing this version as validated.
+
+## Candidate source: Linux 7.2.11
+
+- [CachyOS source release](https://github.com/CachyOS/linux/releases/tag/cachyos-7.2.11-1)
+- Archive SHA-256: `7e212b639092498a11d95cdcf23bbf16690194888bc72766d0ccbb59f5e9844d`
+- Patch snapshot: `1e732dce2d898d25297efddc649cb32b94d46ac5e55cc85f94c5c3a783c7d62d`
+- Upstream patch commit: `333b9269015584d1b31f75af9e23d838d7b3d0fe`
+- Optional features: acpi-call, aufs, handheld.
+- Local patch adaptations: `0001-bore-cachy.patch` (task_ipi_mask context only).
+
+Registered by the updater. Compilation and boot validation must be reviewed
+before describing this version as validated.
