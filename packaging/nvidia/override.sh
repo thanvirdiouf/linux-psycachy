@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Sourced by DKMS after the distribution's NVIDIA dkms.conf. More-specific
 # administrator overrides are still read afterwards by DKMS.
-if [[ ${kernelver:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm$ &&
+if [[ ${kernelver:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm(-minimal)?(-r[1-9][0-9]*)?$ &&
       -r ${kernel_source_dir:-}/.config ]] &&
    grep -qx 'CONFIG_CC_IS_CLANG=y' "$kernel_source_dir/.config" &&
    grep -qx 'CONFIG_LD_IS_LLD=y' "$kernel_source_dir/.config"; then

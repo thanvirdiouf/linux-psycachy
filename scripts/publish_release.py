@@ -109,22 +109,52 @@ def verify_packages(dist, version, commit, run_id):
     packages = sorted(dist.glob("*.deb"))
     require({path.name for path in packages} | {"install-packages.sh"} <= checksums.keys(),
             "The checksum manifest does not cover all release packages")
-    expected = {f"linux-image-{version}-psycachy-llvm", f"linux-headers-{version}-psycachy-llvm",
-                "linux-libc-dev", "psycachy-nvidia-support"}
+    kernel_release = f"{version}-psycachy-llvm"
+    package_version = None
+    meta = (dist / "PACKAGE-BUILD.json").is_file()
+    if meta:
+        identity = json.loads((dist / "PACKAGE-BUILD.json").read_text())
+        require(identity.keys() == {"kernel_release", "package_version", "toolchain"}
+                and identity["toolchain"] == "clang-thinlto", "Invalid package build metadata")
+        kernel_release = identity["kernel_release"]
+        package_version = identity["package_version"]
+        require(re.fullmatch(re.escape(version) + r"-psycachy-llvm(?:-minimal)?(?:-r[1-9][0-9]*)?", kernel_release)
+                and re.fullmatch(re.escape(version) + r"-[1-9][0-9]*", package_version),
+                "Package identity differs from the built kernel")
+    expected = {f"linux-image-{kernel_release}", f"linux-headers-{kernel_release}", "psycachy-nvidia-support"}
+    suffix = '-llvm-minimal' if '-minimal' in kernel_release else '-llvm'
+    if meta:
+        expected |= {f"linux-image-psycachy{suffix}", f"linux-headers-psycachy{suffix}"}
+        for filename in ('OPTIMIZATIONS.json', 'PACKAGE-BUILD.json'):
+            require(filename in checksums, f"Missing checksummed build metadata: {filename}")
+    allowed = expected | {"linux-libc-dev", f"linux-image-{kernel_release}-dbg"}
     found = set()
+    versions = set()
     for package in packages:
         architecture = subprocess.check_output(
             ["dpkg-deb", "--field", str(package), "Architecture"], text=True).strip()
         name = subprocess.check_output(
             ["dpkg-deb", "--field", str(package), "Package"], text=True).strip()
         require(architecture == "amd64", f"Wrong package architecture: {package.name}")
-        require(name in expected and name not in found, f"Unexpected or duplicate package: {name}")
+        require(name in allowed and name not in found, f"Unexpected or duplicate package: {name}")
+        if name != 'psycachy-nvidia-support':
+            current_version = subprocess.check_output(
+                ['dpkg-deb', '--field', str(package), 'Version'], text=True).strip()
+            versions.add(current_version)
+            require(package_version is None or current_version == package_version,
+                    f"Wrong package version: {name}")
+        if meta and name.startswith(('linux-image-psycachy', 'linux-headers-psycachy')):
+            kind = 'image' if name.startswith('linux-image-') else 'headers'
+            depends = subprocess.check_output(
+                ['dpkg-deb', '--field', str(package), 'Depends'], text=True).strip()
+            require(depends == f'linux-{kind}-{kernel_release} (= {package_version})',
+                    f"Wrong tracking package dependency: {name}")
         found.add(name)
-    require(found == expected, "Missing required kernel or NVIDIA support packages")
+    require(expected <= found and len(versions) == 1, "Missing or mismatched kernel or tracking packages")
     validation = (dist / "NVIDIA-VALIDATION.txt").read_text().splitlines()
-    require(f"Kernel: {version}-psycachy-llvm" in validation
+    require(f"Kernel: {kernel_release}" in validation
             and "Compilation and module metadata passed. No GPU boot/load test performed." in validation
-            and all(any(line.startswith(f"{module}: {version}-psycachy-llvm ")
+            and all(any(line.startswith(f"{module}: {kernel_release} ")
                         for line in validation) for module in MODULES),
             "NVIDIA validation does not describe a passing build for this kernel")
     return {path.name: {"size": path.stat().st_size, "digest": digest_file(path)}
@@ -165,6 +195,26 @@ def verify_source(gh, run, version, commit, dist):
                 "Artifact patch metadata differs from the built source lock")
     else:
         require(not (dist / "PATCHES.json").exists(), "Artifact has unpinned patch metadata")
+    if (dist / 'PACKAGE-BUILD.json').is_file():
+        identity = json.loads((dist / 'PACKAGE-BUILD.json').read_text())
+        builder_revision = int(gh.content('src/package-revision', commit).decode().strip())
+        source_revision = (lock or {}).get('debian_revision', 1)
+        require(builder_revision > 0 and type(source_revision) is int and source_revision > 0,
+                'Invalid source package revision')
+        revision = builder_revision + source_revision - 1
+        optimization = json.loads((dist / 'OPTIMIZATIONS.json').read_text())
+        require(optimization.get('profile') in ('full', 'minimal'), 'Invalid build feature profile')
+        suffix = '-minimal' if optimization['profile'] == 'minimal' else ''
+        if revision > 1:
+            suffix += f'-r{revision}'
+        require(identity['package_version'] == f'{version}-{2 * revision}'
+                and identity['kernel_release'] == f'{version}-psycachy-llvm{suffix}',
+                'Package revision differs from its source lock')
+        config = (dist / 'kernel.config').read_text()
+        if optimization['profile'] == 'full':
+            require(all(f'CONFIG_{symbol}=y' in config.splitlines() for symbol in
+                        ('DEBUG_INFO_BTF', 'DEBUG_INFO_BTF_MODULES', 'SCHED_CLASS_EXT')),
+                    'Full build omitted required BTF/sched_ext features')
 
 
 def verify_tag(gh, tag, commit):
@@ -224,7 +274,9 @@ def release_notes(repo, run, version, commit):
 Built with Clang/LLVM and ThinLTO, BORE, BBR3, and ADIOS.
 TOOLCHAIN.txt records compiler versions; kernel.config records the resolved configuration.
 PATCHES.json, when present, records the selected optional features and patch provenance.
-CI builds omit debug information, BTF, and sched_ext.
+OPTIMIZATIONS.json records feature and profiling choices for new builds.
+Full builds retain BTF and sched_ext; minimal builds explicitly omit them.
+Tracking packages allow upgrades through a configured signed APT repository.
 
 Download the packages, install-packages.sh, and SHA256SUMS into one directory.
 Verify with: `sha256sum --check SHA256SUMS`

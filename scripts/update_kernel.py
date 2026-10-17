@@ -73,18 +73,22 @@ def read_default(root, entries):
     return version
 
 
-def select_candidate(entries, releases, current=None):
+def select_candidate(entries, releases, current=None, include_current=False):
     current = current or max(entries, key=version_tuple)
     series = current.rsplit(".", 1)[0]
     current = max((version for version in entries
                    if version.rsplit(".", 1)[0] == series), key=version_tuple)
+    current_revision = int(TAG.fullmatch(entries[current][0])[2])
     candidates = []
     for release in releases:
         match = TAG.fullmatch(release.get("tag_name", ""))
         if not match or release.get("draft") or release.get("prerelease"):
             continue
         version, revision = match.groups()
-        if version.rsplit(".", 1)[0] != series or version_tuple(version) <= version_tuple(current):
+        if version.rsplit(".", 1)[0] != series or version_tuple(version) < version_tuple(current):
+            continue
+        if (version == current and (int(revision) < current_revision
+                                   or (int(revision) == current_revision and not include_current))):
             continue
         tag = release["tag_name"]
         assets = [asset for asset in release.get("assets", [])
@@ -106,6 +110,35 @@ def select_candidate(entries, releases, current=None):
                int(TAG.fullmatch(item["release"])[2])), default=None)
 
 
+def discover(root, entries, releases, current):
+    """Discover source rebuilds and changes to the inputs of an existing source."""
+    series = current.rsplit(".", 1)[0]
+    current = max((version for version in entries if version.rsplit(".", 1)[0] == series), key=version_tuple)
+    candidate = select_candidate(entries, releases, current, include_current=True)
+    if candidate is None:
+        tag, digest = entries[current]
+        candidate = {"version": current, "release": tag,
+                     "url": f"https://github.com/CachyOS/linux/releases/download/{tag}/{tag}.tar.gz",
+                     "digest": f"sha256:{digest}", "size": None}
+    previous = patchsets.release_locks(root).get(candidate["version"], {})
+    inputs = patchsets.discover_inputs(root, candidate)
+    unchanged_source = (candidate["version"] in entries
+                        and entries[candidate["version"]][0] == candidate["release"])
+    if unchanged_source:
+        # A mutable release asset must never silently replace an already pinned
+        # tag, even when the publisher changes its advertised hash.
+        expected = "sha256:" + entries[candidate["version"]][1]
+        if candidate["digest"] and candidate["digest"] != expected:
+            raise ValueError("Published source digest changed for a pinned release; review the replacement manually")
+        candidate["digest"] = expected
+        if previous.get("input_identity") == inputs["identity"]:
+            return None, None
+    candidate["input_identity"] = inputs["identity"]
+    candidate["debian_revision"] = previous.get("debian_revision", 1) + 1 if unchanged_source or previous else 1
+    candidate["branch"] = f"codex/linux-{candidate['version']}-r{candidate['debian_revision']}-{inputs['identity'][:12]}"
+    return candidate, inputs
+
+
 def archive_hash(candidate, destination=None):
     digest = hashlib.sha256()
     size = 0
@@ -119,7 +152,7 @@ def archive_hash(candidate, destination=None):
                     size += len(chunk)
                     archive.write(chunk)
         actual = digest.hexdigest()
-        if size != candidate["size"]:
+        if candidate["size"] is not None and size != candidate["size"]:
             raise ValueError("Downloaded archive size does not match the release asset")
         if candidate["digest"] and candidate["digest"] != f"sha256:{actual}":
             raise ValueError("Downloaded archive does not match the published SHA-256 digest")
@@ -139,29 +172,66 @@ def adaptations(metadata):
 
 def apply_candidate(root, candidate, digest, snapshot=None, metadata=None):
     version, tag = candidate["version"], candidate["release"]
+    match = TAG.fullmatch(tag)
+    if not match or match[1] != version:
+        raise ValueError("Candidate source release does not match its kernel version")
     patch = root / f"src/patches/{version.rsplit('.', 1)[0]}/0001-bore-cachy.patch"
     if not snapshot and not patch.is_file():
         raise ValueError(f"Missing series patch: {patch}")
     entries = read_manifest(root)
-    if version in entries:
-        raise ValueError(f"Version already registered: {version}")
     read_default(root, entries)
     manifest = root / "src/releases.tsv"
     provenance = root / "src/patches/SOURCES.md"
     lockfile = root / "src/patches/releases.json"
-    locks = json.loads(lockfile.read_text()) if lockfile.exists() else {}
+    locks = patchsets.release_locks(root)
+    if not HASH.fullmatch(digest):
+        raise ValueError("Invalid source archive SHA-256")
+    old = entries.get(version)
+    revision = candidate.get("debian_revision", locks.get(version, {}).get("debian_revision", 1) + 1 if old else 1)
+    if type(revision) is not int or revision < 1 or (old and revision <= locks.get(version, {}).get("debian_revision", 1)):
+        raise ValueError("Debian build revision must increase for an existing kernel version")
+    if old and int(match[2]) < int(TAG.fullmatch(old[0])[2]):
+        raise ValueError("Refusing to downgrade the pinned source revision")
+    if old and old[0] == tag and old[1] != digest:
+        raise ValueError("Refusing to replace a pinned source tag with a different archive")
     if snapshot:
-        patchsets.verify_snapshot(root, snapshot)
-        locks[version] = {"source_sha256": digest, "snapshot": snapshot}
+        _, verified = patchsets.verify_snapshot(root, snapshot)
+        if metadata != verified:
+            raise ValueError("Snapshot metadata does not match the reviewed candidate")
+        if candidate.get("input_identity") and candidate["input_identity"] != metadata.get("input_identity"):
+            raise ValueError("Snapshot inputs do not match the reviewed candidate")
+        if metadata.get("recipe", {}).get("source_release", tag) != tag:
+            raise ValueError("Recipe snapshot does not match the candidate source")
+        previous = locks.get(version)
+        if previous and previous.get("snapshot") == snapshot and old == (tag, digest):
+            raise ValueError("Candidate inputs are already registered")
+        entry = {"source_sha256": digest, "source_release": tag, "snapshot": snapshot,
+                 "debian_revision": revision, "input_identity": metadata.get("input_identity")}
+        if old:
+            history = list((previous or {}).get("history", []))
+            history.append({**{key: value for key, value in (previous or {}).items() if key != "history"},
+                            "source_release": old[0], "source_sha256": old[1],
+                            "debian_revision": (previous or {}).get("debian_revision", 1)})
+            entry["history"] = history
+        locks[version] = entry
+    elif old:
+        raise ValueError("Replacing a registered source requires an immutable input snapshot")
     # Validate and prepare all contents before modifying tracked files.
     adapted = adaptations(metadata) if snapshot else []
-    manifest_text = manifest.read_text().rstrip("\n") + f"\n{version}\t{tag}\t{digest}\n"
+    row = f"{version}\t{tag}\t{digest}"
+    manifest_text = ("\n".join(row if line.split() and line.split()[0] == version else line
+                               for line in manifest.read_text().splitlines()) + "\n" if old else
+                     manifest.read_text().rstrip("\n") + f"\n{row}\n")
     notes = provenance.read_text().rstrip("\n") + (
         f"\n\n## Candidate source: Linux {version}\n\n"
         f"- [CachyOS source release](https://github.com/CachyOS/linux/releases/tag/{tag})\n"
         f"- Archive SHA-256: `{digest}`\n" +
         (f"- Patch snapshot: `{snapshot}`\n"
          f"- Upstream patch commit: `{metadata['upstream_commit']}`\n"
+         f"- Debian build revision: `{revision}`\n" +
+         (f"- [Upstream recipe snapshot](https://github.com/CachyOS/linux-cachyos/tree/{metadata['recipe']['commit']}/linux-cachyos)\n"
+          f"- Upstream config SHA-256: `{metadata['recipe']['config_sha256']}`\n"
+          if metadata.get("recipe") else "") +
          f"- Optional features: {', '.join(metadata['features']) or 'none'}.\n" +
          (f"- Local patch adaptations: {', '.join(adapted)}.\n" if adapted else "") + "\n"
          if snapshot else "- Reuses the series BORE patch and shared Debian headers patch.\n\n") +
@@ -177,7 +247,7 @@ def apply_candidate(root, candidate, digest, snapshot=None, metadata=None):
 def report(candidate):
     values = {"update": "true" if candidate else "false"}
     if candidate:
-        values.update({key: candidate[key] for key in ("version", "release", "branch")})
+        values.update({key: candidate[key] for key in ("version", "release", "branch", "input_identity", "debian_revision")})
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:
             for key, value in values.items():
@@ -189,23 +259,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="Download, hash, and register the candidate")
     parser.add_argument("--expected-release", help="Abort if the discovered candidate has changed")
+    parser.add_argument("--expected-input-id", help="Abort if the pinned recipe, config or patch inputs have changed")
     args = parser.parse_args()
     entries = read_manifest(ROOT)
-    candidate = select_candidate(entries, fetch_releases(), current=read_default(ROOT, entries))
+    candidate, inputs = discover(ROOT, entries, fetch_releases(), read_default(ROOT, entries))
     if args.expected_release and (not candidate or candidate["release"] != args.expected_release):
         raise ValueError("The upstream candidate changed; rerun the update workflow")
+    if args.expected_input_id and (not candidate or candidate["input_identity"] != args.expected_input_id):
+        raise ValueError("The upstream candidate inputs changed; rerun the update workflow")
     if candidate and args.apply:
         archive = ROOT / f"src/{candidate['release']}.tar.gz"
         digest = archive_hash(candidate, archive)
-        snapshot, metadata = patchsets.refresh(ROOT, candidate, archive)
+        snapshot, metadata = patchsets.refresh(ROOT, candidate, archive, inputs)
         apply_candidate(ROOT, candidate, digest, snapshot, metadata)
         notes = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "kernel-update-pr.md"
         notes.write_text(
-            f"Adds Linux {candidate['version']} from `{candidate['release']}` and pins archive\n"
+            f"Updates Linux {candidate['version']} to Debian build revision {candidate['debian_revision']}\n"
+            f"from `{candidate['release']}` and pins archive\n"
             f"SHA-256 `{digest}`. Refreshes selected patches at upstream commit\n"
             f"`{metadata['upstream_commit']}` and pins snapshot `{snapshot}`.\n"
+            f"Pins [the matching CachyOS recipe and configuration](https://github.com/CachyOS/linux-cachyos/tree/{metadata['recipe']['commit']}/linux-cachyos).\n"
+            f"Input identity: `{candidate['input_identity']}`.\n"
             f"Optional features: {', '.join(metadata['features']) or 'none'}.\n"
-            "Previous releases retain their patch snapshots.\n\n"
+            "Previous source pins and package revisions remain in the lock history; their snapshots are retained.\n\n"
             "The update workflow builds this exact branch commit and uploads Debian packages.\n"
             "Open its run to inspect the build and download the artifacts.\n\n"
             "- [ ] Review patch application and the resolved kernel configuration.\n"

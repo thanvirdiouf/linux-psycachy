@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Test optional packaging, kernel scoping, and install order without root."""
 
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts import package_nvidia
 
@@ -37,16 +42,21 @@ class NvidiaTests(unittest.TestCase):
         return result.stdout
 
     def test_only_psycachy_llvm_kernels_are_overridden(self):
-        for kernel in ("7.2.9-psycachy", "7.2.9-nitro-thinlto", "7.0.0-38-generic"):
+        for kernel in ("7.2.9-psycachy", "7.2.9-nitro-thinlto", "7.0.0-38-generic",
+                       "7.2.9-psycachy-llvm-r0", "7.2.9-psycachy-llvm-r3-extra",
+                       "7.2.9-psycachy-llvm-minimal-r3-extra", "7.2.9-psycachy-llvm-minimals-r3"):
             with self.subTest(kernel=kernel):
                 output = self.override(kernel)
                 self.assertIn("original-gcc", output)
                 self.assertIn("other-command", output)
                 self.assertNotIn("psycachy-nvidia-support/build", output)
-        output = self.override("7.3.1-psycachy-llvm", "190107")
-        self.assertIn("build 19", output)
-        self.assertNotIn("original-gcc", output)
-        self.assertNotIn("other-command", output)
+        for kernel in ("7.3.1-psycachy-llvm", "7.3.1-psycachy-llvm-minimal",
+                       "7.3.1-psycachy-llvm-r3", "7.3.1-psycachy-llvm-minimal-r3"):
+            with self.subTest(kernel=kernel):
+                output = self.override(kernel, "190107")
+                self.assertIn("build 19", output)
+                self.assertNotIn("original-gcc", output)
+                self.assertNotIn("other-command", output)
 
     def test_invalid_toolchain_metadata_fails_build(self):
         for value in ("", "no-version", "180103; touch /tmp/never"):
@@ -101,6 +111,29 @@ class NvidiaTests(unittest.TestCase):
         residual = conf.read_text().replace("/usr/share/psycachy-nvidia-support", str(self.root / "removed"))
         subprocess.run(["bash", "-c", "MAKE[0]=original; " + residual + '\n[[ ${MAKE[0]} == original ]]'], check=True)
 
+    def test_same_helper_version_is_reproducible_across_kernel_epochs_and_source_mtimes(self):
+        source = self.root / "source"
+        shutil.copytree(ROOT / "packaging/nvidia", source / "packaging/nvidia")
+        shutil.copyfile(ROOT / "LICENSE", source / "LICENSE")
+        digests = []
+        for index, epoch in enumerate((946684800, 1893456000)):
+            for path in source.rglob("*"):
+                os.utime(path, (epoch, epoch))
+            original_umask = os.umask(0o022 if index == 0 else 0o077)
+            try:
+                with patch.dict(os.environ, SOURCE_DATE_EPOCH=str(epoch)):
+                    package = package_nvidia.build(self.root / str(index), "18", root=source)
+            finally:
+                os.umask(original_umask)
+            digests.append(hashlib.sha256(package.read_bytes()).hexdigest())
+            for option in ("--ctrl-tarfile", "--fsys-tarfile"):
+                data = subprocess.check_output(["dpkg-deb", option, str(package)])
+                with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                    for member in archive:
+                        self.assertEqual(member.mtime, package_nvidia.PACKAGE_EPOCH)
+                        self.assertEqual((member.uid, member.gid), (0, 0))
+        self.assertEqual(digests[0], digests[1])
+
     def test_postinst_selects_latest_nvidia_and_only_installed_llvm_kernels(self):
         modules = self.root / "modules"
         for kernel in ("7.2.9-psycachy-llvm", "7.2.9-psycachy", "7.2.9-nitro-thinlto"):
@@ -137,7 +170,7 @@ class InstallerTests(unittest.TestCase):
         self.bins.mkdir()
         scripts = {
             "sudo": 'printf "%s\\n" "$*" >> "$INSTALL_LOG"',
-            "dpkg-deb": 'if [[ $3 == Version ]]; then echo 7.2.9-2; else p=${2##*/}; echo "${p%%_*}"; fi',
+            "dpkg-deb": 'if [[ $3 == Version ]]; then echo 7.2.9-2; elif [[ $3 == Architecture ]]; then echo amd64; else p=${2##*/}; echo "${p%%_*}"; fi',
             "dkms": 'echo "nvidia/595.99.02, 7.2.9-psycachy-llvm, x86_64: installed"',
             "modinfo": 'echo "7.2.9-psycachy-llvm SMP modversions"',
         }

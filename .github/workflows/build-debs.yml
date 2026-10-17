@@ -14,6 +14,9 @@ on:
       publish_release:
         default: false
         type: boolean
+      build_profile:
+        default: full
+        type: string
   workflow_dispatch:
     inputs:
       kernel_version:
@@ -25,6 +28,11 @@ on:
         required: true
         default: false
         type: boolean
+      build_profile:
+        description: Full retains BTF and sched_ext; minimal explicitly omits them
+        type: choice
+        options: [full, minimal]
+        default: full
   push:
     branches: [master, main]
     paths:
@@ -33,6 +41,8 @@ on:
       - src/releases.tsv
       - src/default-version
       - src/llvm-version
+      - src/package-revision
+      - src/debian.config
       - src/nvidia-validation.json
       - packaging/**
       - src/patches/**
@@ -46,6 +56,8 @@ on:
       - src/releases.tsv
       - src/default-version
       - src/llvm-version
+      - src/package-revision
+      - src/debian.config
       - src/nvidia-validation.json
       - packaging/**
       - src/patches/**
@@ -64,6 +76,7 @@ env:
   BUILD_COMMIT: ${{ inputs.source_ref || github.sha }}
   PYTHONDONTWRITEBYTECODE: '1'
   TOOLCHAIN: clang-thinlto
+  BUILD_PROFILE: ${{ inputs.build_profile || 'full' }}
 
 jobs:
   validate:
@@ -96,7 +109,7 @@ jobs:
       - name: Check shell syntax and run regression tests
         shell: bash
         run: |
-          for script in build.sh scripts/psycachy-ld scripts/install-packages.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
+          for script in build.sh scripts/*.sh scripts/validation/*.sh scripts/validation/dkms/build.sh scripts/psycachy-ld secureboot/create-key.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
             bash -n "$script"
           done
           python3 -m unittest discover -s tests -v
@@ -114,6 +127,7 @@ jobs:
       KBUILD_BUILD_HOST: github-runner
     outputs:
       artifact-id: ${{ steps.packages.outputs.artifact-id }}
+      kernel-release: ${{ steps.bundle.outputs.kernel-release }}
     defaults:
       run:
         shell: bash
@@ -139,11 +153,18 @@ jobs:
           printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
           printf 'LLVM_VERSION=%s\n' "$(<src/llvm-version)" >> "$GITHUB_ENV"
 
-      - name: Prepare sources and install build dependencies
+      - name: Install a pinned BTF encoder on Ubuntu LTS
+        if: env.BUILD_PROFILE == 'full'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libdw-dev libelf-dev libbpf-dev zlib1g-dev
+          bash scripts/build_pahole.sh "$GITHUB_WORKSPACE/.cache/tools"
+          printf 'PAHOLE=%s\n' "$GITHUB_WORKSPACE/.cache/tools/bin/pahole" >> "$GITHUB_ENV"
+
+      - name: Prepare source with the selected feature profile
         env:
           BUILD_CACHE: '0'
-        run: |
-          ./build.sh "$KERNEL_VERSION" --prepare-only 2>&1 | tee build.log
+        run: ./build.sh "$KERNEL_VERSION" --prepare-only 2>&1 | tee build.log
 
       - name: Install compiler cache and identify cache compatibility
         id: cache-settings
@@ -167,18 +188,6 @@ jobs:
           key: kernel-cache-v1-${{ steps.cache-settings.outputs.prefix }}-${{ env.KERNEL_VERSION }}-${{ env.BUILD_COMMIT }}
           restore-keys: |
             kernel-cache-v1-${{ steps.cache-settings.outputs.prefix }}-
-
-      - name: Configure a build without debug information
-        run: |
-          # Full DWARF plus debug .debs can exhaust a hosted runner's disk.
-          # Keep generic hardware support, BORE, BBR3, ADIOS, and module versioning.
-          "src/build-$KERNEL_VERSION-clang-thinlto/scripts/config" --file src/config \
-            --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
-            --disable DEBUG_INFO_DWARF4 --disable DEBUG_INFO_DWARF5 \
-            --enable DEBUG_INFO_NONE \
-            --disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES \
-            --disable SCHED_CLASS_EXT --disable GDB_SCRIPTS \
-            --disable GENDWARFKSYMS --enable GENKSYMS
 
       - name: Compile and package the kernel
         run: |
@@ -204,44 +213,36 @@ jobs:
           fi
 
       - name: Verify and collect Debian packages
+        id: bundle
         run: |
+          bundle=$(<src/last-package-output)
+          cp -a "$bundle" dist
+          kernel_release=$(python3 -c 'import json; print(json.load(open("dist/PACKAGE-BUILD.json"))["kernel_release"])')
+          printf 'kernel-release=%s\n' "$kernel_release" >> "$GITHUB_OUTPUT"
           shopt -s nullglob
-          packages=(src/*.deb)
-          for prefix in linux-image linux-headers linux-libc-dev psycachy-nvidia-support; do
-            matches=(src/"$prefix"*.deb)
+          packages=(dist/*.deb)
+          for prefix in linux-image linux-headers psycachy-nvidia-support; do
+            matches=(dist/"$prefix"*.deb)
             if [[ ${#matches[@]} -eq 0 ]]; then
               echo "Missing expected package: $prefix" >&2
               exit 1
             fi
           done
-          mkdir -p dist
           for package in "${packages[@]}"; do
             dpkg-deb --info "$package"
             test "$(dpkg-deb --field "$package" Architecture)" = amd64
-            cp "$package" dist/
           done
           metadata=(src/*.buildinfo src/*.changes)
           if [[ ${#metadata[@]} -gt 0 ]]; then
             cp "${metadata[@]}" dist/
           fi
-          cp "src/build-$KERNEL_VERSION-clang-thinlto/.config" dist/kernel.config
-          cp "src/build-$KERNEL_VERSION-clang-thinlto/TOOLCHAIN.txt" dist/TOOLCHAIN.txt
-          cp "src/build-$KERNEL_VERSION-clang-thinlto/BUILD-TUNING.txt" dist/BUILD-TUNING.txt
-          cp src/install-packages.sh dist/install-packages.sh
-          python3 - "$KERNEL_VERSION" <<'PY'
-          import json, pathlib, shutil, sys
-          from scripts import patchsets
-          folder, metadata = patchsets.load(pathlib.Path.cwd(), sys.argv[1])
-          if metadata:
-              shutil.copyfile(folder / 'patchset.json', 'dist/PATCHES.json')
-          PY
           printf 'Kernel: %s\nCommit: %s\nRun: %s\n' \
             "$KERNEL_VERSION" "$BUILD_COMMIT" "$GITHUB_RUN_ID" > dist/BUILD.txt
-          (cd dist && sha256sum ./*.deb install-packages.sh > SHA256SUMS)
 
       - name: Compile pinned NVIDIA modules against packaged headers
         run: |
           python3 scripts/validate_nvidia.py --packages dist
+          python3 -c 'from pathlib import Path; from scripts.collect_packages import write_checksums; write_checksums(Path("dist"))'
           cat dist/NVIDIA-VALIDATION.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save compiler and ThinLTO caches
@@ -273,16 +274,70 @@ jobs:
             diagnostics/
             dist/nvidia-build.log
             dist/NVIDIA-VALIDATION.txt
-            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/.config
-            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/TOOLCHAIN.txt
-            src/build-${{ env.KERNEL_VERSION }}-clang-thinlto/BUILD-TUNING.txt
+            src/build-*/.config
+            src/build-*/TOOLCHAIN.txt
+            src/build-*/BUILD-TUNING.txt
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
+  install-boot:
+    name: Install, DKMS and boot (${{ matrix.distro }})
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian
+            suite: trixie
+          - distro: ubuntu
+            suite: noble
+    steps:
+      - name: Check out validation tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Download this build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist
+      - name: Install VM validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-system-x86 e2fsprogs debian-archive-keyring ubuntu-keyring
+      - name: Install the pinned Debian 13 archive keyring
+        if: matrix.distro == 'debian'
+        run: |
+          # Noble's packaged keyring predates the trixie archive signing keys.
+          key_package="$RUNNER_TEMP/debian-archive-keyring_2025.1_all.deb"
+          curl --fail --location --retry 3 --output "$key_package" \
+            https://deb.debian.org/debian/pool/main/d/debian-archive-keyring/debian-archive-keyring_2025.1_all.deb
+          printf '9ea7778e443144ca490668737a8ab22dd3e748bb99e805e22ec055abeb3c7fac  %s\n' "$key_package" | sha256sum --check
+          dpkg-deb --extract "$key_package" "$RUNNER_TEMP/debian-keyring"
+          sudo install -m 0644 "$RUNNER_TEMP/debian-keyring/usr/share/keyrings/debian-archive-keyring.gpg" \
+            /usr/share/keyrings/debian-archive-keyring.gpg
+      - name: Exercise installation and boot in a disposable VM
+        run: |
+          sudo python3 scripts/validate_install.py --packages dist \
+            --distro '${{ matrix.distro }}' --suite '${{ matrix.suite }}' \
+            --work-dir "$RUNNER_TEMP/install-${{ matrix.distro }}" \
+            --output "diagnostics/install-${{ matrix.distro }}"
+      - name: Upload installation and serial boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: psycachy-install-${{ matrix.distro }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnostics/install-${{ matrix.distro }}/
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish GitHub Release
-    needs: [validate, build]
+    needs: [validate, build, install-boot]
     if: github.event_name == 'workflow_dispatch' && inputs.publish_release && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -308,7 +363,7 @@ jobs:
           test -s NVIDIA-VALIDATION.txt
           test -s install-packages.sh
           shopt -s nullglob
-          for prefix in linux-image linux-headers linux-libc-dev psycachy-nvidia-support; do
+          for prefix in linux-image linux-headers psycachy-nvidia-support; do
             packages=("$prefix"*.deb)
             if [[ ${#packages[@]} -eq 0 ]]; then
               echo "Missing release package: $prefix" >&2
@@ -327,8 +382,9 @@ jobs:
           PsyCachy Linux $KERNEL_VERSION for generic x86-64 Debian/Ubuntu systems.
 
           Built with Clang/LLVM and ThinLTO, BORE, BBR3, and ADIOS.
-          Compiler versions are recorded in TOOLCHAIN.txt. CI builds omit debug information,
-          BTF, and sched_ext. The resolved configuration is attached as kernel.config.
+          Compiler versions are recorded in TOOLCHAIN.txt. OPTIMIZATIONS.json records the
+          selected feature profile and profile-guided optimization inputs. Full builds retain
+          BTF and sched_ext. The resolved configuration is attached as kernel.config.
 
           Download the packages, install-packages.sh, and SHA256SUMS into one directory.
           Verify with: sha256sum --check SHA256SUMS

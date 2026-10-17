@@ -1,7 +1,5 @@
-# This definition stops the following lines failing if HOME isn't
-# defined.
-HOME                    = .
-RANDFILE                = $ENV::HOME/.rnd
+# SPDX-License-Identifier: GPL-2.0-only
+# Local configuration; no personal identity or network access is required.
 [ req ]
 distinguished_name      = req_distinguished_name
 x509_extensions         = v3
@@ -9,16 +7,13 @@ string_mask             = utf8only
 prompt                  = no
 
 [ req_distinguished_name ]
-countryName             = BR
-stateOrProvinceName     = BR
-localityName            = BR
-0.organizationName      = psygreg
-commonName              = Secure Boot Signing Key
-emailAddress            = psygreg@pm.me
+0.organizationName      = PsyCachy
+commonName              = PsyCachy Secure Boot Signing Key
 
 [ v3 ]
 subjectKeyIdentifier    = hash
 authorityKeyIdentifier  = keyid:always,issuer
 basicConstraints        = critical,CA:FALSE
-extendedKeyUsage        = codeSigning,1.3.6.1.4.1.311.10.3.6
+keyUsage                = critical,digitalSignature
+extendedKeyUsage        = codeSigning
 nsComment               = "OpenSSL Generated Certificate"

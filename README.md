@@ -5,11 +5,14 @@ Build CachyOS-based Linux kernels for **Debian and Ubuntu**, with generic
 ready to install.
 PsyCachy combines BORE scheduling with the CachyOS source tree's BBR3 congestion
 control and ADIOS I/O scheduler. GitHub Actions handles package builds and
-proposes updates when a newer supported stable kernel becomes available.
+proposes updates for supported stable kernels, CachyOS source revisions, and
+relevant upstream recipe, configuration, and patch changes.
 
 The earlier **GCC build of Linux 7.2.9** has been compiled, installed, and
 boot-tested. The Clang/ThinLTO build and NVIDIA 595.99.02 open modules have passed
-compilation checks, including a DKMS build; boot and GPU validation remain pending.
+compilation checks, including a DKMS build. The new full-profile build, pinned
+upstream configuration, and revised installation/VM checks need a successful CI
+run before this change can be described as validated. GPU validation remains pending.
 The default
 version is recorded in [src/default-version](src/default-version), and all
 registered versions are listed in [src/releases.tsv](src/releases.tsv).
@@ -18,11 +21,13 @@ registered versions are listed in [src/releases.tsv](src/releases.tsv).
 
 - Clang/LLVM with ThinLTO for generic x86-64 hardware, plus an explicit GCC fallback.
 - BORE scheduling, BBR3 as the `tcp_bbr3` module, and ADIOS from the CachyOS source.
-- Kernel image, headers, and libc development `.deb` packages.
+- Kernel image, headers, and tracking metapackages; distro userspace headers stay unchanged.
 - Optional NVIDIA DKMS support package with matching LLVM dependencies.
 - Verified source archives and immutable patch snapshots for registered builds.
 - GitHub Actions builds, downloadable artifacts, and optional release publication.
 - Automated update PRs with refreshed patches and configurable optional modules.
+- Explicit full/minimal feature profiles and optional AutoFDO/Propeller inputs.
+- Signed static APT repository preparation and local Secure Boot signing tools.
 
 Future automated updates enable handheld support, AUFS, and ACPI-call by default.
 These choices are configured in [src/patches/profile.json](src/patches/profile.json).
@@ -52,8 +57,15 @@ bash install-packages.sh --nvidia
 The installer first installs the optional `psycachy-nvidia-support` package and
 its LLVM dependencies, then installs the kernel and headers. This order ensures
 NVIDIA's modules build with the correct tools during installation. Without
-`--nvidia`, the optional support package is excluded. Older releases without
-the installer can be installed with `sudo apt install ./linux-*.deb`.
+`--nvidia`, the optional support package is excluded. The installer skips debug
+packages and installs tracking packages when present. `linux-libc-dev` is excluded;
+`--with-libc-dev` explicitly opts into replacing the distribution's userspace UAPI
+headers, which kernel boot and DKMS do not require.
+
+For automatic APT updates, keep `linux-image-psycachy-llvm` and
+`linux-headers-psycachy-llvm` installed and configure a signed repository. The
+[APT operator guide](packaging/apt/README.md) explains preparing and hosting one.
+No public APT endpoint or signing key is supplied by this repository.
 
 Reboot and select the installed kernel from your boot menu. Keep a working kernel
 available while testing a new build. Compilation alone does not establish boot,
@@ -72,8 +84,16 @@ cd linux-psycachy
 
 Replace `7.2.9` with a version registered in `src/releases.tsv`. The builder
 verifies the pinned source archive, checks the selected patches, migrates
-[src/config](src/config) through `olddefconfig`, and writes packages to `src/`.
-It does not install the resulting kernel.
+the pinned upstream configuration through `olddefconfig`, and applies the explicit
+[Debian configuration delta](src/debian.config). Legacy snapshots without an
+upstream configuration use [src/config](src/config).
+It writes an isolated installable bundle under `src/packages/`, including
+`SHA256SUMS` and `install-packages.sh`, and records its path in
+`src/last-package-output`. It does not install the resulting kernel.
+
+```sh
+bash "$(cat src/last-package-output)/install-packages.sh"
+```
 
 Missing build and packaging dependencies are installed through `sudo apt-get`.
 The default toolchain family is **LLVM 18**, recorded in
@@ -84,6 +104,22 @@ versions are recorded in `TOOLCHAIN.txt`; distro package updates can change them
 Set `INSTALL_DEPS=0` to use tools you have supplied yourself. A local override
 such as `LLVM_VERSION=19` requires a complete matching toolchain and separate
 validation. Changing compiler versions requires a fresh build tree.
+
+The default `BUILD_PROFILE=full` retains **BTF and sched_ext** and requires
+`pahole` 1.26 or newer. On a host with an older encoder, build the pinned local
+tool and pass its path explicitly (the host packages below are build dependencies):
+
+```sh
+sudo apt-get install cmake git libdw-dev libelf-dev libbpf-dev zlib1g-dev
+bash scripts/build_pahole.sh "$PWD/.cache/tools"
+PAHOLE="$PWD/.cache/tools/bin/pahole" ./build.sh 7.2.9
+```
+
+`BUILD_PROFILE=minimal ./build.sh 7.2.9` deliberately omits debug information,
+BTF, and sched_ext. It uses separate build directories, kernel names, and tracking
+packages with `-minimal`. The builder never silently removes these features.
+Full builds retain DWARF for BTF generation but skip the large debug `.deb` unless
+`BUILD_DEBUG_PACKAGE=1` is set.
 
 To prepare sources without compiling the complete kernel:
 
@@ -125,9 +161,16 @@ TOOLCHAIN=gcc ./build.sh 7.2.9
 
 Clang builds use `src/build-<version>-clang-thinlto` and the kernel suffix
 `-psycachy-llvm`; GCC builds retain `src/build-<version>` and `-psycachy`.
-Their kernel images and headers can coexist. Clang package revisions use
-`<version>-2`, while GCC uses `<version>-1`; `linux-libc-dev` remains a shared
-package. Existing GCC object files are preserved.
+Their kernel images and headers can coexist. The effective revision `R` is
+`src/package-revision + the release lock's debian_revision - 1`. Clang packages
+use `<version>-2R` and GCC uses `<version>-(2R-1)`, preserving the old initial
+revisions. For `R > 1`, kernel names and build directories also include `-rR`:
+same-version patch/config updates therefore get fresh DKMS module directories.
+Increment [src/package-revision](src/package-revision) for builder or local config
+changes; the updater increments the release lock for upstream input changes.
+`PACKAGE_REVISION` can override the builder revision for private rebuilds.
+Existing bundle directories are never overwritten; move one aside to repeat an
+identical build.
 
 Subsequent runs reuse the selected tree
 when its source and patch fingerprints match. Patch order, patch contents, and
@@ -135,9 +178,23 @@ optional configuration changes are included in this check; moving patch files
 alone does not invalidate a prepared build. Compiler and linker versions are
 also checked before reuse.
 
-Edit `src/config` to customize local builds. With `pahole` older than 1.26, the
-builder disables BTF and sched_ext. Install `pahole` 1.26 or newer before building
-if you need BTF-dependent BPF programs.
+Edit `src/debian.config` to customize the delta applied to a pinned upstream
+configuration. `OPTIMIZATIONS.json` records the feature profile, base-config hash,
+and whether profiling inputs were supplied. Generic x86-64-v1 remains the portable
+CPU target. Default builds do not use AutoFDO or Propeller profiles and do not
+claim equivalence to CachyOS's profiled binaries.
+
+To use profiles generated for your selected source/configuration/workload, set
+`CLANG_AUTOFDO_PROFILE=/absolute/path/profile.afdo` and optionally
+`CLANG_PROPELLER_PROFILE_PREFIX=/absolute/path/propeller`. The latter requires
+`propeller_cc_profile.txt` and `propeller_ld_profile.txt`. The builder enables
+and verifies the relevant Kconfig options, passes profiles to Kbuild, and records
+their hashes. Unsupported compiler/profile combinations fail explicitly.
+Profile quality and performance still require workload measurements.
+
+BBR3 and ADIOS are available as modules. The configuration keeps `cubic` as the
+default congestion control; installing this kernel does not select BBR3 or ADIOS
+for your system. Configure runtime policy separately for your workload.
 
 ### External modules and DKMS
 
@@ -151,7 +208,8 @@ working kernel. Building packages does not change system DKMS configuration.
 ### NVIDIA support
 
 Clang builds also produce `psycachy-nvidia-support_<version>_amd64.deb`. This
-package configures NVIDIA DKMS builds only for `*-psycachy-llvm` kernels. It reads
+package configures NVIDIA DKMS builds only for PsyCachy LLVM kernels, including
+minimal and revision suffixes. It reads
 the LLVM family from the installed headers and uses a wrapper to prevent DKMS
 from replacing the versioned compiler/linker with unsuffixed defaults. Other
 kernels keep their existing build settings. More-specific administrator DKMS
@@ -205,9 +263,11 @@ The package artifact is named
 Artifacts are retained for **14 days**. A separate diagnostic artifact contains
 the kernel/NVIDIA build logs and configuration, including when compilation fails.
 
-CI builds omit debug information, BTF, and sched_ext to fit standard runners.
-They use Clang/LLVM with ThinLTO, retain generic x86-64 support, and use
-`genksyms` for module versioning.
+CI defaults to the full feature profile, builds a pinned pahole on Ubuntu LTS,
+and passes that encoder explicitly to every Kbuild invocation. The manual
+`build_profile` input can select minimal. Both profiles use Clang/LLVM with ThinLTO
+and retain generic x86-64 support. `OPTIMIZATIONS.json` and `PACKAGE-BUILD.json`
+describe the exact output.
 CI restores compiler and ThinLTO caches compatible with the installed LLVM
 toolchain and saves them after successful builds and NVIDIA validation. Pull
 requests can restore caches but do not save them. The run summary includes
@@ -216,7 +276,12 @@ The diagnostic artifact contains `resources.csv`, `summary.json` and GNU time
 output. Memory samples are host-wide; GNU time's maximum RSS is per process,
 not total memory used by all compiler and linker jobs. Use these measurements
 to compare runs before increasing job counts or changing the configuration.
-Local builds use `src/config` with the builder's compatibility adjustments.
+After compilation, fresh **Debian 13 (trixie)** and **Ubuntu 24.04 (noble)** images
+exercise package installation, kernel hooks, a small DKMS module, generated
+initramfs, and direct QEMU boot. Serial logs and reports are separate diagnostic
+artifacts. Release publication waits for both jobs. These checks do not establish
+GPU, suspend/resume, firmware Secure Boot, or compatibility with other releases.
+The new validation jobs have not been run until a workflow with this change passes.
 
 ### Publish a release
 
@@ -262,14 +327,15 @@ at **03:23 UTC / 08:53 IST**, and can also be started manually. It follows the
 kernel series in `src/default-version`: a default of `7.2.9` selects newer
 `7.2.x` versions with matching CachyOS source releases.
 
-For a new eligible version, the updater:
+For eligible new or revised inputs, the updater:
 
 1. Downloads and verifies the exact CachyOS source archive.
-2. Pins the current `CachyOS/kernel-patches` commit and downloads the selected
-   patches for the same kernel series, verifying their Git blobs.
+2. Pins a `linux-cachyos` recipe and its exact config for that source release,
+   plus the selected `CachyOS/kernel-patches` files and their verified Git blobs.
 3. Checks patch application with zero fuzz, saves an immutable snapshot, and
    records the source, checksum, patch lock, and new default version.
-4. Opens a `codex/linux-<version>` PR and builds its exact commit.
+4. Increments the release's Debian revision, keeps previous locks in history,
+   opens a uniquely identified `codex/linux-...` PR, and builds its exact commit.
 
 BORE and the Debian headers configuration fix are always included. Optional
 features are selected through `src/patches/profile.json`:
@@ -283,9 +349,11 @@ selected Steam Deck, ASUS Ally, MSI, Zotac, and audio modules. AUFS and ACPI-cal
 are also built as modules. Other upstream patches are listed in the update PR
 for review and are not applied automatically.
 
-Patch-only upstream commits, same-version CachyOS source revisions, and release
-candidates do not trigger update builds. A new kernel series requires deliberate
-adoption. Existing open or closed update PRs are skipped to avoid repeated builds.
+Same-version CachyOS revisions and relevant selected patch/config/recipe changes
+trigger update proposals. Unselected patch changes and unrelated upstream commits
+do not. Discovery and application must agree on the complete input identity.
+Release candidates and new kernel series require deliberate adoption.
+Existing open or closed PRs for that exact update identity are skipped.
 Patch conflicts stop the update for review; selected patches are never silently
 omitted.
 
@@ -298,6 +366,24 @@ packages before merging. To retry a build after editing an update branch, run
 **Build Debian kernel packages** manually on that branch with its candidate version.
 Release publication remains a separate manual step.
 
+## Secure Boot
+
+The signing tool operates on an explicitly selected local kernel and local key;
+it does not fetch code, guess release names, or modify bootloader settings.
+
+```sh
+sudo bash secureboot/create-key.sh --kernel-release 7.2.10-psycachy-llvm-r3 \
+  --key-dir /root/.local/share/psycachy/secureboot --create-key --enroll
+```
+
+Use the actual release from `PACKAGE-BUILD.json` or `uname -r`. Install `openssl`,
+`sbsigntool`, and, for enrollment, `mokutil` first. `--image /absolute/path/vmlinuz`
+selects another image explicitly. Signing verifies the result, keeps an unsigned
+backup, and atomically replaces the selected image. `--verify-only` checks it;
+`--restore` restores the backup. Enrollment still requires completing the firmware
+MOK screen. External/DKMS modules must also be signed with an enrolled trusted key;
+signing the kernel image alone does not establish module trust.
+
 ## Maintenance and contribution
 
 | File or directory | Purpose |
@@ -305,6 +391,8 @@ Release publication remains a separate manual step.
 | `src/releases.tsv` | Pinned source releases and archive checksums |
 | `src/default-version` | Default CI version and updater's selected kernel series |
 | `src/config` | Base kernel configuration |
+| `src/debian.config` | Explicit delta applied to pinned upstream configurations |
+| `src/package-revision` | Builder/config revision, also separates kernel ABIs |
 | `src/llvm-version` | Default LLVM major version for local and CI builds |
 | `src/patches/profile.json` | Optional features for future automated updates |
 | `src/patches/releases.json` | Source-bound kernel-to-snapshot locks |

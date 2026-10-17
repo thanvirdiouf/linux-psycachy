@@ -3,6 +3,7 @@
 """Pin, verify, and configure immutable CachyOS patch snapshots."""
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -14,6 +15,8 @@ import urllib.request
 
 
 REPOSITORY = "CachyOS/kernel-patches"
+RECIPE_REPOSITORY = "CachyOS/linux-cachyos"
+RECIPE_DIRECTORY = "linux-cachyos"
 FEATURE_CONFIG = {
     "acpi-call": {"ACPI_CALL": "m"},
     "aufs": {"AUFS_FS": "m"},
@@ -31,17 +34,17 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def api(path):
+def api(path, repository=REPOSITORY):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "PsyCachy-updater"}
     if token := os.environ.get("GH_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(f"https://api.github.com/repos/{REPOSITORY}/{path}", headers=headers)
+    request = urllib.request.Request(f"https://api.github.com/repos/{repository}/{path}", headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 
 
-def upstream_index(series):
-    commit = api("commits/master")["sha"]
+def upstream_index(series, commit=None):
+    commit = commit or api("commits/master")["sha"]
     if not SHA1.fullmatch(commit):
         raise ValueError("Invalid upstream patch commit")
     tree = api(f"git/trees/{commit}?recursive=1")
@@ -50,6 +53,92 @@ def upstream_index(series):
     entries = {entry["path"]: entry for entry in tree["tree"]
                if entry["type"] == "blob" and entry["path"].startswith(series + "/")}
     return commit, entries
+
+
+def git_file(repository, commit, path):
+    """Read a file at an immutable commit, checking GitHub's Git blob identity."""
+    if not SHA1.fullmatch(commit):
+        raise ValueError("Invalid upstream recipe commit")
+    entry = api(f"contents/{path}?ref={commit}", repository)
+    if entry.get("type") != "file" or entry.get("encoding") != "base64":
+        raise ValueError(f"Unexpected upstream file response: {path}")
+    content = base64.b64decode(entry["content"], validate=False)
+    if len(content) > 16 * 1024 * 1024:
+        raise ValueError(f"Upstream file is unexpectedly large: {path}")
+    blob = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+    if blob != entry["sha"]:
+        raise ValueError(f"Upstream file does not match the pinned Git blob: {path}")
+    return content
+
+
+def recipe_release(content):
+    """Recognize the upstream stable source expression without executing shell."""
+    text = content.decode()
+    fields = {}
+    for name, pattern in (("_major", r"\d+\.\d+"), ("_minor", r"\d+"), ("_tagrel", r"\d+")):
+        matches = re.findall(rf"^[ \t]*{name}=([^\n]*)$", text, re.MULTILINE)
+        if len(matches) != 1 or not re.fullmatch(pattern, matches[0].strip()):
+            raise ValueError(f"Unsupported PKGBUILD assignment for {name}; review upstream recipe manually")
+        fields[name] = matches[0].strip()
+    sources = re.findall(r"^[ \t]*_srcname=([^\n]*)$", text, re.MULTILINE)
+    expressions = {"cachyos-${_major}.${_minor}-${_tagrel}",
+                   '"cachyos-${_major}.${_minor}-${_tagrel}"', "'cachyos-${_major}.${_minor}-${_tagrel}'"}
+    if (len(sources) != 1 or sources[0].strip() not in expressions
+            or re.search(r"^[ \t]*_rcver=", text, re.MULTILINE)):
+        raise ValueError("Unsupported PKGBUILD source expression; review upstream recipe manually")
+    return f"cachyos-{fields['_major']}.{fields['_minor']}-{fields['_tagrel']}"
+
+
+def recipe_snapshot(source_release):
+    """Find the newest directory snapshot that actually targets this source tag.
+
+    A newer PKGBUILD may already target the next kernel. Walk directory history
+    to retain config-only changes while refusing to pair that recipe with an
+    older archive. The bounded search fails closed when manual review is needed.
+    """
+    for page in range(1, 11):
+        commits = api(f"commits?path={RECIPE_DIRECTORY}&per_page=100&page={page}", RECIPE_REPOSITORY)
+        if not isinstance(commits, list):
+            raise ValueError("Unexpected upstream recipe history response")
+        for item in commits:
+            commit = item["sha"]
+            recipe = git_file(RECIPE_REPOSITORY, commit, f"{RECIPE_DIRECTORY}/PKGBUILD")
+            try:
+                release = recipe_release(recipe)
+            except ValueError:
+                # RC and old recipe formats are not stable candidates. Their
+                # shell is never evaluated, including during history search.
+                continue
+            if release != source_release:
+                continue
+            config = git_file(RECIPE_REPOSITORY, commit, f"{RECIPE_DIRECTORY}/config")
+            metadata = {"repository": RECIPE_REPOSITORY, "commit": commit,
+                        "path": f"{RECIPE_DIRECTORY}/PKGBUILD", "sha256": hashlib.sha256(recipe).hexdigest(),
+                        "config_path": f"{RECIPE_DIRECTORY}/config", "config_sha256": hashlib.sha256(config).hexdigest(),
+                        "source_release": release}
+            return metadata, {"upstream-PKGBUILD": recipe, "upstream-config": config}
+        if len(commits) < 100:
+            break
+    raise ValueError(f"No supported stable recipe snapshot targets {source_release}; review upstream before updating")
+
+
+def discover_inputs(root, candidate, patch_commit=None):
+    """Resolve reviewable immutable recipe, configuration and selected patches."""
+    recipe, contents = recipe_snapshot(candidate["release"])
+    series = candidate["version"].rsplit(".", 1)[0]
+    features = profile(root)
+    commit, entries = upstream_index(series, patch_commit) if patch_commit else upstream_index(series)
+    paths = select_paths(series, features, entries)
+    # Only used content affects discovery. An unrelated patch or README change
+    # must not cause daily rebuilds; the actual commits still enter provenance.
+    inputs = {"source_release": candidate["release"],
+              "recipe_sha256": recipe["sha256"], "config_sha256": recipe["config_sha256"],
+              "features": features, "patch_blobs": {path: entries[path]["sha"] for _, path in paths},
+              "debian_patch_sha256": hashlib.sha256(
+                  (root / "src/patches/common/0002-debian-headers-config.patch").read_bytes()).hexdigest()}
+    return {"identity": hashlib.sha256(canonical(inputs)).hexdigest(), "recipe": recipe,
+            "contents": contents, "features": features, "commit": commit,
+            "entries": entries, "paths": paths}
 
 
 def profile(root):
@@ -187,31 +276,62 @@ def verify_snapshot(root, identity):
     for symbol, value in metadata["config"].items():
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", symbol) or value not in ("y", "m", "n"):
             raise ValueError("Invalid snapshot configuration")
+    if recipe := metadata.get("recipe"):
+        if (recipe.get("repository") != RECIPE_REPOSITORY or not SHA1.fullmatch(recipe.get("commit", ""))
+                or recipe.get("path") != f"{RECIPE_DIRECTORY}/PKGBUILD"
+                or recipe.get("config_path") != f"{RECIPE_DIRECTORY}/config"):
+            raise ValueError("Invalid upstream recipe provenance")
+        for filename, digest in (("upstream-PKGBUILD", recipe["sha256"]),
+                                 ("upstream-config", recipe["config_sha256"])):
+            path = folder / filename
+            if (not isinstance(digest, str) or not SHA256.fullmatch(digest) or path.is_symlink()
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+                raise ValueError(f"Recipe snapshot checksum mismatch: {filename}")
+        if recipe_release((folder / "upstream-PKGBUILD").read_bytes()) != recipe["source_release"]:
+            raise ValueError("Recipe snapshot targets a different source release")
     return folder, metadata
 
 
-def load(root, version):
+def release_locks(root):
     lockfile = root / "src/patches/releases.json"
     locks = json.loads(lockfile.read_text()) if lockfile.exists() else {}
+    if not isinstance(locks, dict) or any(not isinstance(entry, dict) for entry in locks.values()):
+        raise ValueError("Invalid patch release lock document")
+    for entry in locks.values():
+        revision = entry.get("debian_revision", 1)
+        if type(revision) is not int or revision < 1:
+            raise ValueError("Invalid Debian package revision in patch lock")
+    return locks
+
+
+def load(root, version):
+    locks = release_locks(root)
     if version not in locks:
         return None, None
     entry = locks[version]
     rows = [line.split() for line in (root / "src/releases.tsv").read_text().splitlines()
             if line.split() and line.split()[0] == version]
-    if len(rows) != 1 or rows[0][2] != entry["source_sha256"]:
+    if (len(rows) != 1 or rows[0][2] != entry["source_sha256"]
+            or entry.get("source_release", rows[0][1]) != rows[0][1]):
         raise ValueError("Patch lock does not match the pinned source archive")
-    return verify_snapshot(root, entry["snapshot"])
+    folder, metadata = verify_snapshot(root, entry["snapshot"])
+    if metadata.get("recipe", {}).get("source_release", rows[0][1]) != rows[0][1]:
+        raise ValueError("Upstream recipe does not match the pinned source archive")
+    return folder, metadata
 
 
-def refresh(root, candidate, archive):
+def refresh(root, candidate, archive, inputs=None):
     series = candidate["version"].rsplit(".", 1)[0]
-    features = profile(root)
-    commit, entries = upstream_index(series)
-    paths = select_paths(series, features, entries)
+    inputs = inputs or discover_inputs(root, candidate)
+    if inputs["recipe"]["source_release"] != candidate["release"]:
+        raise ValueError("Upstream recipe does not match the candidate source archive")
+    features = inputs["features"]
+    commit, entries, paths = inputs["commit"], inputs["entries"], inputs["paths"]
     config = {key: value for feature in features for key, value in FEATURE_CONFIG[feature].items()}
     metadata = {"upstream_commit": commit, "features": features, "config": config,
-                "upstream_paths": sorted(entries), "patches": []}
-    contents = {}
+                "upstream_paths": sorted(entries), "patches": [],
+                "recipe": inputs["recipe"], "input_identity": inputs["identity"]}
+    contents = dict(inputs["contents"])
     with tempfile.TemporaryDirectory(prefix=".prepare-patches-", dir=root / "src") as temporary:
         tree = Path(temporary) / "source"
         tree.mkdir()
@@ -249,7 +369,7 @@ def refresh(root, candidate, archive):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list", "config-id", "configure", "verify-config"))
+    parser.add_argument("command", choices=("list", "config-id", "configure", "verify-config", "base-config", "debian-revision", "metadata"))
     parser.add_argument("root", type=Path)
     parser.add_argument("version")
     parser.add_argument("tree", nargs="?", type=Path)
@@ -267,8 +387,17 @@ def main():
             for patch in metadata["patches"]:
                 print(folder / patch["name"])
     elif args.command == "config-id":
-        if config:
+        if metadata and metadata.get("recipe"):
+            print(hashlib.sha256(canonical({"config": config,
+                "base_config_sha256": metadata["recipe"]["config_sha256"]})).hexdigest())
+        elif config:
             print(hashlib.sha256(canonical(config)).hexdigest())
+    elif args.command == "base-config":
+        print(folder / "upstream-config" if metadata and metadata.get("recipe") else args.root / "src/config")
+    elif args.command == "debian-revision":
+        print(release_locks(args.root).get(args.version, {}).get("debian_revision", 1))
+    elif args.command == "metadata":
+        print(json.dumps(metadata or {}, indent=2, sort_keys=True))
     elif args.command == "configure":
         for symbol, value in config.items():
             flag = {"y": "--enable", "m": "--module", "n": "--disable"}[value]

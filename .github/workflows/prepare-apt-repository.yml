@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: Prepare signed APT repository artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tags:
+        description: Space-separated published release tags to include (retain previous kernels too)
+        required: true
+        type: string
+      suite:
+        description: APT suite name
+        default: stable
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Sign repository for operator review
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    steps:
+      - name: Check out repository tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download selected published release bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAGS: ${{ inputs.release_tags }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          tags = os.environ['RELEASE_TAGS'].split()
+          if not tags or len(tags) != len(set(tags)):
+              raise SystemExit('Select one or more distinct published release tags')
+          repository = os.environ['GITHUB_REPOSITORY']
+          for index, tag in enumerate(tags):
+              if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]*', tag):
+                  raise SystemExit('Invalid release tag')
+              release = json.loads(subprocess.check_output(
+                  ['gh', 'api', f'repos/{repository}/releases/tags/{tag}'], text=True))
+              if release.get('draft') or not release.get('published_at') or release.get('tag_name') != tag:
+                  raise SystemExit('Select published releases only')
+              destination = pathlib.Path('bundles') / str(index)
+              destination.mkdir(parents=True)
+              subprocess.run(['gh', 'release', 'download', tag, '--repo', repository,
+                              '--dir', str(destination)], check=True)
+          PY
+
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y dpkg-dev gnupg
+
+      - name: Prepare signed repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          PSYCACHY_APT_KEY_PASSPHRASE: ${{ secrets.APT_SIGNING_KEY_PASSPHRASE }}
+          APT_SIGNING_FINGERPRINT: ${{ vars.APT_SIGNING_FINGERPRINT }}
+          APT_SUITE: ${{ inputs.suite }}
+        shell: bash
+        run: |
+          test -n "$APT_SIGNING_KEY" || { echo 'Configure the apt-signing environment signing key first.' >&2; exit 1; }
+          key_dir=$(mktemp -d "$RUNNER_TEMP/psycachy-apt-gnupg.XXXXXX")
+          trap 'gpgconf --homedir "$key_dir" --kill all; rm -rf -- "$key_dir"' EXIT
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --homedir "$key_dir" --import
+          unset APT_SIGNING_KEY
+          args=()
+          for bundle in bundles/*; do args+=(--packages "$bundle"); done
+          python3 scripts/apt_repository.py "${args[@]}" --output apt-repository \
+            --suite "$APT_SUITE" --gnupghome "$key_dir" --signing-key "$APT_SIGNING_FINGERPRINT"
+
+      - name: Upload repository for operator review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: signed-apt-repository-${{ github.run_id }}
+          path: apt-repository/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

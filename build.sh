@@ -6,6 +6,7 @@ usage() {
     echo "Usage: $0 <version> [--prepare-only]"
     echo "Example: $0 7.2.9"
     echo "Default: Clang/LLVM with ThinLTO. Set TOOLCHAIN=gcc for a GCC build."
+    echo "BUILD_PROFILE=full (default) retains BTF/sched_ext; minimal explicitly omits them."
 }
 
 if [[ ${1:-} == --help ]]; then
@@ -89,6 +90,31 @@ done
 
 archive="$repo_dir/src/$source_release.tar.gz"
 toolchain=${TOOLCHAIN:-clang-thinlto}
+build_profile=${BUILD_PROFILE:-full}
+if [[ $build_profile != full && $build_profile != minimal ]]; then
+    echo "BUILD_PROFILE must be full or minimal." >&2
+    exit 1
+fi
+if [[ -n ${CLANG_AUTOFDO_PROFILE:-} ]]; then
+    CLANG_AUTOFDO_PROFILE=$(realpath -- "$CLANG_AUTOFDO_PROFILE")
+    export CLANG_AUTOFDO_PROFILE
+fi
+if [[ -n ${CLANG_PROPELLER_PROFILE_PREFIX:-} ]]; then
+    CLANG_PROPELLER_PROFILE_PREFIX=$(realpath -m -- "$CLANG_PROPELLER_PROFILE_PREFIX")
+    export CLANG_PROPELLER_PROFILE_PREFIX
+fi
+release_revision=1
+if [[ $locked_patches == 1 ]]; then
+    release_revision=$(python3 "$repo_dir/scripts/patchsets.py" debian-revision "$repo_dir" "$version")
+fi
+builder_revision=1
+if [[ -f $repo_dir/src/package-revision ]]; then builder_revision=$(<"$repo_dir/src/package-revision"); fi
+builder_revision=${PACKAGE_REVISION:-$builder_revision}
+if [[ ! $release_revision =~ ^[1-9][0-9]*$ || ! $builder_revision =~ ^[1-9][0-9]*$ ]]; then
+    echo "Package revisions must be positive integers." >&2
+    exit 1
+fi
+revision=$((builder_revision + release_revision - 1))
 make_args=()
 case "$toolchain" in
     clang-thinlto)
@@ -101,7 +127,7 @@ case "$toolchain" in
         make_args=("LLVM=$LLVM" LLVM_IAS=1)
         build_dir="$repo_dir/src/build-$version-clang-thinlto"
         local_version=-psycachy-llvm
-        package_version="$version-2"
+        package_version="$version-$((2 * revision))"
         tools=(clang clang++ ld.lld llvm-ar llvm-nm llvm-strip llvm-objcopy llvm-objdump llvm-readelf)
         for index in "${!tools[@]}"; do tools[$index]="${tools[$index]}-$llvm_version"; done
         ;;
@@ -110,7 +136,7 @@ case "$toolchain" in
         make_args=(CC=gcc HOSTCC=gcc HOSTCXX=g++)
         build_dir="$repo_dir/src/build-$version"
         local_version=-psycachy
-        package_version="$version-1"
+        package_version="$version-$((2 * revision - 1))"
         tools=(gcc g++ ld ar nm strip objcopy objdump readelf)
         ;;
     *)
@@ -118,13 +144,27 @@ case "$toolchain" in
         exit 1
         ;;
 esac
+if [[ $build_profile == minimal ]]; then
+    build_dir+=-minimal
+    local_version+=-minimal
+fi
+if (( revision > 1 )); then
+    local_version+="-r$revision"
+    build_dir+="-r$revision"
+fi
+package_output="$repo_dir/src/packages/$version-$toolchain-r$revision-$build_profile"
+if [[ ${2:-} != --prepare-only && -e $package_output ]]; then
+    echo "Package output already exists: $package_output" >&2
+    echo "Move it aside, or increment src/package-revision for a changed build." >&2
+    exit 1
+fi
 staging_dir=
 trap 'echo "Build failed at line $LINENO." >&2' ERR
 trap 'if [[ -n $staging_dir ]]; then rm -rf -- "$staging_dir"; fi' EXIT
 
 # Reject unsupported versions before downloading or installing dependencies.
 dependencies=(build-essential bc bison flex libssl-dev libelf-dev libdw-dev libncurses-dev
-    pkg-config python3 perl openssl curl zstd xz-utils)
+    pkg-config python3 perl openssl curl zstd xz-utils pahole)
 if [[ $toolchain == clang-thinlto ]]; then
     dependencies+=("clang-$llvm_version" "lld-$llvm_version" "llvm-$llvm_version")
 fi
@@ -150,6 +190,14 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     fi
 fi
 
+if [[ $build_profile == full ]]; then
+    pahole_bin=$(command -v "${PAHOLE:-pahole}") || {
+        echo "Full builds require pahole >= 1.26; install it or select BUILD_PROFILE=minimal." >&2
+        exit 1
+    }
+    make_args+=("PAHOLE=$pahole_bin")
+    tools+=("$pahole_bin")
+fi
 # Record the toolchain and reject reuse after a compiler or linker change.
 toolchain_info=$(printf 'Toolchain: %s\n' "$toolchain"
     for tool in "${tools[@]}"; do
@@ -271,7 +319,14 @@ if [[ $toolchain == clang-thinlto ]]; then effective_thinlto_tuning=$thinlto_tun
 printf 'Compiler cache: %s\nThinLTO tuning: %s\nMake jobs: %s\nModule link jobs: %s\nKernel link jobs: %s\nBuild timestamp: %s\n' \
     "$build_cache" "$effective_thinlto_tuning" "$jobs" "$module_link_jobs" "$kernel_link_jobs" \
     "${KBUILD_BUILD_TIMESTAMP-automatic}" > BUILD-TUNING.txt
-cp -- "$repo_dir/src/config" .config
+base_config="$repo_dir/src/config"
+if [[ $locked_patches == 1 ]]; then
+    base_config=$(python3 "$repo_dir/scripts/patchsets.py" base-config "$repo_dir" "$version")
+fi
+cp -- "$base_config" .config
+if [[ -f $repo_dir/src/debian.config ]]; then
+    python3 "$repo_dir/scripts/kernel_config.py" .config "$repo_dir/src/debian.config"
+fi
 if [[ $locked_patches == 1 ]]; then
     python3 "$repo_dir/scripts/patchsets.py" configure "$repo_dir" "$version" "$build_dir"
 fi
@@ -284,16 +339,61 @@ else
         --disable LTO_CLANG_THIN_DIST --enable LTO_NONE
 fi
 
-# Ubuntu LTS ships older pahole; BORE itself does not require BTF.
-if [[ $(scripts/pahole-version.sh "${PAHOLE:-pahole}") -lt 126 ]]; then
-    echo "pahole >= 1.26 unavailable; disabling BTF and sched_ext for this build."
+if [[ $build_profile == full ]]; then
+    if [[ $(scripts/pahole-version.sh "${PAHOLE:-pahole}") -lt 126 ]]; then
+        echo "Full builds require pahole >= 1.26 for BTF/sched_ext. Install it or explicitly set BUILD_PROFILE=minimal." >&2
+        exit 1
+    fi
+    scripts/config --disable DEBUG_INFO_NONE --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
+        --disable DEBUG_INFO_DWARF4 --enable DEBUG_INFO_DWARF5 \
+        --enable DEBUG_INFO_BTF --enable DEBUG_INFO_BTF_MODULES --enable SCHED_CLASS_EXT
+else
+    echo "Minimal profile selected: omitting debug information, BTF and sched_ext."
     scripts/config --disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES \
-        --disable SCHED_CLASS_EXT
+        --disable SCHED_CLASS_EXT --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
+        --disable DEBUG_INFO_DWARF4 --disable DEBUG_INFO_DWARF5 --enable DEBUG_INFO_NONE \
+        --disable GENDWARFKSYMS --enable GENKSYMS
+fi
+# Profiling is explicit: never silently claim a profile-guided build.
+scripts/config --disable AUTOFDO_CLANG --disable PROPELLER_CLANG
+if [[ -n ${CLANG_AUTOFDO_PROFILE:-}${CLANG_PROPELLER_PROFILE_PREFIX:-} && $toolchain != clang-thinlto ]]; then
+    echo "AutoFDO/Propeller profiles require the Clang toolchain." >&2
+    exit 1
+fi
+if [[ -n ${CLANG_AUTOFDO_PROFILE:-} ]]; then
+    CLANG_AUTOFDO_PROFILE=$(realpath -- "$CLANG_AUTOFDO_PROFILE")
+    test -s "$CLANG_AUTOFDO_PROFILE"
+    export CLANG_AUTOFDO_PROFILE
+    scripts/config --enable AUTOFDO_CLANG
+    make_args+=("CLANG_AUTOFDO_PROFILE=$CLANG_AUTOFDO_PROFILE")
+fi
+if [[ -n ${CLANG_PROPELLER_PROFILE_PREFIX:-} ]]; then
+    CLANG_PROPELLER_PROFILE_PREFIX=$(realpath -m -- "$CLANG_PROPELLER_PROFILE_PREFIX")
+    test -s "${CLANG_PROPELLER_PROFILE_PREFIX}_cc_profile.txt"
+    test -s "${CLANG_PROPELLER_PROFILE_PREFIX}_ld_profile.txt"
+    export CLANG_PROPELLER_PROFILE_PREFIX
+    scripts/config --enable PROPELLER_CLANG
+    make_args+=("CLANG_PROPELLER_PROFILE_PREFIX=$CLANG_PROPELLER_PROFILE_PREFIX")
 fi
 make "${make_args[@]}" olddefconfig
 if [[ $locked_patches == 1 ]]; then
     python3 "$repo_dir/scripts/patchsets.py" verify-config "$repo_dir" "$version" "$build_dir"
 fi
+if [[ $build_profile == full ]]; then
+    for symbol in DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES SCHED_CLASS_EXT; do
+        if ! grep -qx "CONFIG_$symbol=y" .config; then
+            echo "Required full-profile configuration is missing: CONFIG_$symbol" >&2
+            exit 1
+        fi
+    done
+fi
+for setting in CLANG_AUTOFDO_PROFILE CLANG_PROPELLER_PROFILE_PREFIX; do
+    if [[ -n ${!setting:-} ]]; then
+        symbol=AUTOFDO_CLANG
+        if [[ $setting == CLANG_PROPELLER_PROFILE_PREFIX ]]; then symbol=PROPELLER_CLANG; fi
+        grep -qx "CONFIG_$symbol=y" .config || { echo "Unsupported profiling option: CONFIG_$symbol" >&2; exit 1; }
+    fi
+done
 if [[ $toolchain == clang-thinlto ]]; then
     for symbol in CC_IS_CLANG LD_IS_LLD AS_IS_LLVM LTO_CLANG_THIN; do
         if ! grep -qx "CONFIG_$symbol=y" .config; then
@@ -328,9 +428,47 @@ if [[ ${2:-} == --prepare-only ]]; then
     exit 0
 fi
 
+export PSYCACHY_BUILD_PROFILE="$build_profile" PSYCACHY_BASE_CONFIG="$base_config"
+export PSYCACHY_DEBIAN_CONFIG="$repo_dir/src/debian.config"
+python3 - <<'PY'
+import hashlib, json, os
+from pathlib import Path
+config = Path('.config').read_text().splitlines()
+cpu_target = 'custom'
+if 'CONFIG_GENERIC_CPU=y' in config:
+    cpu_target = 'generic-x86-64-v' + next((line.split('=', 1)[1] for line in config if line.startswith('CONFIG_X86_64_VERSION=')), '1')
+elif 'CONFIG_MZEN4=y' in config:
+    cpu_target = 'zen4'
+elif 'CONFIG_X86_NATIVE_CPU=y' in config:
+    cpu_target = 'native'
+data = {"profile": os.environ['PSYCACHY_BUILD_PROFILE'], "cpu_target": cpu_target,
+        "base_config_sha256": hashlib.sha256(Path(os.environ['PSYCACHY_BASE_CONFIG']).read_bytes()).hexdigest(),
+        "autofdo": None, "propeller": None}
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+if Path(os.environ['PSYCACHY_DEBIAN_CONFIG']).is_file():
+    data['debian_config_sha256'] = digest(os.environ['PSYCACHY_DEBIAN_CONFIG'])
+if path := os.environ.get('CLANG_AUTOFDO_PROFILE'):
+    data['autofdo'] = {"sha256": digest(path)}
+if prefix := os.environ.get('CLANG_PROPELLER_PROFILE_PREFIX'):
+    data['propeller'] = {name: digest(prefix + '_' + name + '_profile.txt') for name in ('cc', 'ld')}
+Path('OPTIMIZATIONS.json').write_text(json.dumps(data, indent=2) + '\n')
+PY
+if [[ ${BUILD_DEBUG_PACKAGE:-0} != 1 ]]; then
+    export DEB_BUILD_PROFILES="${DEB_BUILD_PROFILES:+$DEB_BUILD_PROFILES }pkg.linux-upstream.nokerneldbg"
+fi
 make "${make_args[@]}" bindeb-pkg -j"$jobs" "LOCALVERSION=$local_version" "KDEB_PKGVERSION=$package_version"
+collector_args=()
 if [[ $toolchain == clang-thinlto ]]; then
-    python3 "$repo_dir/scripts/package_nvidia.py" --llvm-version "$llvm_version" --output "$repo_dir/src"
+    nvidia_package=$(python3 "$repo_dir/scripts/package_nvidia.py" --llvm-version "$llvm_version" --output "$repo_dir/src" | tail -n 1)
+    collector_args+=(--nvidia-package "$nvidia_package")
 fi
 cp -- "$repo_dir/scripts/install-packages.sh" "$repo_dir/src/install-packages.sh"
-echo "Kernel build complete. Debian packages are in $repo_dir/src."
+if [[ $locked_patches == 1 ]]; then
+    python3 "$repo_dir/scripts/patchsets.py" metadata "$repo_dir" "$version" > "$build_dir/PATCHES.json"
+fi
+python3 "$repo_dir/scripts/collect_packages.py" --source "$repo_dir/src" --output "$package_output" \
+    --tree "$build_dir" --kernel-release "$version$local_version" \
+    --package-version "$package_version" --toolchain "$toolchain" "${collector_args[@]}"
+printf '%s\n' "$package_output" > "$repo_dir/src/last-package-output"
+echo "Kernel build complete. Installable package bundle: $package_output"

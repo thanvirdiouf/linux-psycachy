@@ -1,0 +1,18 @@
+From: PsyCachy contributors
+Subject: [PATCH] builddeb: include the configuration in the headers package
+
+Keep the configuration available to DKMS and other external module builds.
+Rebased from the archived PsyCachy config.patch for Linux 7.2.9.
+
+--- a/scripts/package/builddeb
++++ b/scripts/package/builddeb
+@@ -146,6 +146,9 @@ install_kernel_headers () {
+ 		"${srctree}/scripts/package/install-extmod-build" "${pdir}/usr/src/linux-headers-${version}"
+ 	fi
+ 
++	# External module builds need the kernel configuration as well.
++	cp -p "${KCONFIG_CONFIG:-$srctree/.config}" "${pdir}/usr/src/linux-headers-${version}/.config"
++
+ 	mkdir -p $pdir/lib/modules/$version/
+ 	ln -s /usr/src/linux-headers-$version $pdir/lib/modules/$version/build
+ }

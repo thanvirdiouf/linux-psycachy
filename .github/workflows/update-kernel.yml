@@ -37,12 +37,12 @@ jobs:
       - name: Test updater and builder
         shell: bash
         run: |
-          for script in build.sh scripts/psycachy-ld scripts/install-packages.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
+          for script in build.sh scripts/*.sh scripts/validation/*.sh scripts/validation/dkms/build.sh scripts/psycachy-ld secureboot/create-key.sh packaging/nvidia/*.sh packaging/nvidia/preinst packaging/nvidia/postinst packaging/nvidia/build; do
             bash -n "$script"
           done
           python3 -m unittest discover -s tests -v
 
-      - name: Find a newer release in the current series
+      - name: Find source, recipe, config or selected patch updates
         id: discover
         shell: bash
         env:
@@ -57,6 +57,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KERNEL_VERSION: ${{ steps.discover.outputs.version }}
           SOURCE_RELEASE: ${{ steps.discover.outputs.release }}
+          INPUT_IDENTITY: ${{ steps.discover.outputs.input_identity }}
+          DEBIAN_REVISION: ${{ steps.discover.outputs.debian_revision }}
           UPDATE_BRANCH: ${{ steps.discover.outputs.branch }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
@@ -69,7 +71,8 @@ jobs:
             exit 0
           fi
 
-          python3 scripts/update_kernel.py --apply --expected-release "$SOURCE_RELEASE"
+          python3 scripts/update_kernel.py --apply --expected-release "$SOURCE_RELEASE" \
+            --expected-input-id "$INPUT_IDENTITY"
           remote=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH")
           if [[ -n $remote ]]; then
             # Recover a branch left behind if an earlier PR creation failed.
@@ -94,7 +97,7 @@ jobs:
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add src/releases.tsv src/default-version src/patches/SOURCES.md \
               src/patches/releases.json src/patches/snapshots/
-            git commit -m "Add Linux $KERNEL_VERSION support"
+            git commit -m "Update Linux $KERNEL_VERSION build revision $DEBIAN_REVISION"
             git push origin "HEAD:refs/heads/$UPDATE_BRANCH"
             commit=$(git rev-parse HEAD)
           fi
@@ -103,7 +106,7 @@ jobs:
             >> "$RUNNER_TEMP/kernel-update-pr.md"
           url=$(gh pr create --repo "$GITHUB_REPOSITORY" \
             --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" \
-            --title "Add Linux $KERNEL_VERSION support" \
+            --title "Update Linux $KERNEL_VERSION build revision $DEBIAN_REVISION" \
             --body-file "$RUNNER_TEMP/kernel-update-pr.md")
           printf 'Update PR: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
           printf 'build=true\ncommit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
@@ -111,7 +114,7 @@ jobs:
       - name: Report no update
         if: steps.discover.outputs.update != 'true'
         shell: bash
-        run: echo 'No newer supported stable release found.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Pinned source, recipe, config and selected patches are current.' >> "$GITHUB_STEP_SUMMARY"
 
   build-update:
     name: Build the proposed kernel

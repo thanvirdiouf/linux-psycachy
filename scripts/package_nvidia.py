@@ -3,6 +3,7 @@
 """Build the optional NVIDIA DKMS integration package without kernel compilation."""
 
 import argparse
+import os
 from pathlib import Path
 import re
 import shutil
@@ -10,6 +11,9 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+# Helper 1.1's packaging epoch, independent of the kernel/source commit. Keep it
+# stable across rebuilds; changing helper payload requires a version bump.
+PACKAGE_EPOCH = 1792195200  # 2026-10-17 00:00:00 UTC
 
 
 def build(output, llvm_version, root=ROOT):
@@ -64,7 +68,17 @@ def build(output, llvm_version, root=ROOT):
         wrapper.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / "build", wrapper)
         wrapper.chmod(0o755)
-        subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(stage), str(package)], check=True)
+        # Identical helper versions are shared by multiple retained kernel
+        # releases. Their .debs must keep one byte identity in the APT pool.
+        executable = {control / "preinst", control / "postinst", wrapper}
+        for path in [stage, *stage.rglob("*")]:
+            path.chmod(0o755 if path.is_dir() or path in executable else 0o644)
+            os.utime(path, (PACKAGE_EPOCH, PACKAGE_EPOCH))
+        package_env = dict(os.environ, SOURCE_DATE_EPOCH=str(PACKAGE_EPOCH), LC_ALL="C", TZ="UTC")
+        subprocess.run([
+            "dpkg-deb", "--root-owner-group", "--threads-max=1", "-Zxz", "-z6",
+            "--uniform-compression", "--build", str(stage), str(package),
+        ], env=package_env, check=True)
     return package
 
 

@@ -10,3 +10,6 @@ __pycache__/
 /src/*.buildinfo
 /src/*.changes
 /src/install-packages.sh
+/src/packages/
+/src/last-package-output
+/src/SHA256SUMS

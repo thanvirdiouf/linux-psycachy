@@ -23,6 +23,9 @@ class UpdateTests(unittest.TestCase):
         (self.root / "src/patches/7.2").mkdir(parents=True)
         (self.root / ".github/workflows").mkdir(parents=True)
         (self.root / "src/patches/7.2/0001-bore-cachy.patch").write_text("patch\n")
+        (self.root / "src/patches/common").mkdir()
+        (self.root / "src/patches/common/0002-debian-headers-config.patch").write_text("headers\n")
+        (self.root / "src/patches/profile.json").write_text('{"features": []}')
         (self.root / "src/patches/SOURCES.md").write_text("Validated source: 7.2.9\n")
         self.manifest = self.root / "src/releases.tsv"
         self.manifest.write_text("# Pinned sources\n7.2.9\tcachyos-7.2.9-2\t" + "a" * 64 + "\n")
@@ -33,6 +36,31 @@ class UpdateTests(unittest.TestCase):
         self.entries = updater.read_manifest(self.root)
         self.archive = b"source archive fixture"
         self.digest = hashlib.sha256(self.archive).hexdigest()
+        self.recipe_patch = patch.object(updater.patchsets, "recipe_snapshot", side_effect=self.recipe)
+        self.recipe_patch.start()
+        self.addCleanup(self.recipe_patch.stop)
+        self.index_patch = patch.object(updater.patchsets, "upstream_index", return_value=("a" * 40, {
+            "7.2/sched/0001-bore-cachy.patch": {"sha": "b" * 40}}))
+        self.index_patch.start()
+        self.addCleanup(self.index_patch.stop)
+
+    def recipe(self, release):
+        match = updater.TAG.fullmatch(release)
+        series, minor = match[1].rsplit(".", 1)
+        recipe = (f"_major={series}\n_minor={minor}\n_tagrel={match[2]}\n"
+                  "_srcname=cachyos-${_major}.${_minor}-${_tagrel}\n").encode()
+        config = b"CONFIG_CACHY=y\n"
+        return {"repository": updater.patchsets.RECIPE_REPOSITORY, "commit": "c" * 40,
+                "path": "linux-cachyos/PKGBUILD", "config_path": "linux-cachyos/config",
+                "source_release": release, "sha256": hashlib.sha256(recipe).hexdigest(),
+                "config_sha256": hashlib.sha256(config).hexdigest()}, {
+                    "upstream-PKGBUILD": recipe, "upstream-config": config}
+
+    def mark_current(self):
+        candidate, _ = updater.discover(self.root, self.entries, [], "7.2.9")
+        entry = {"input_identity": candidate["input_identity"], "debian_revision": 1,
+                 "source_sha256": "a" * 64, "source_release": "cachyos-7.2.9-2"}
+        (self.root / "src/patches/releases.json").write_text(json.dumps({"7.2.9": entry}))
 
     def release(self, version="7.2.10", revision=1, **extra):
         tag = f"cachyos-{version}-{revision}"
@@ -58,25 +86,29 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(candidate["release"], "cachyos-7.2.11-3")
         self.assertEqual(candidate["branch"], "codex/linux-7.2.11")
 
-    def test_skips_rc_new_series_and_same_version_rebuilds(self):
-        releases = [self.release("7.3.1"), self.release("7.2.9", 99),
+    def test_skips_rc_new_series_and_older_rebuilds(self):
+        releases = [self.release("7.3.1"), self.release("7.2.9", 2), self.release("7.2.9", 1),
                     self.release("7.2.99", draft=True),
                     self.release("7.2.12", prerelease=True),
                     self.release(tag_name="cachyos-7.3-rc6-1"),
                     self.release("7.2.8")]
         self.assertIsNone(updater.select_candidate(self.entries, releases))
 
+    def test_same_linux_version_source_revision_is_selected(self):
+        selected = updater.select_candidate(self.entries, [self.release("7.2.9", 3), self.release("7.2.9", 99)])
+        self.assertEqual(selected["release"], "cachyos-7.2.9-99")
+
     def test_follows_the_selected_default_series(self):
         self.entries["6.18.55"] = ("cachyos-6.18.55-1", "b" * 64)
         selected = updater.select_candidate(self.entries, [self.release("6.18.56"), self.release()], current="6.18.55")
         self.assertEqual(selected["version"], "6.18.56")
 
-    def test_does_not_repropose_or_downgrade_registered_versions(self):
+    def test_new_revision_of_latest_registered_version_is_selected(self):
         self.entries["7.2.11"] = ("cachyos-7.2.11-1", "b" * 64)
         selected = updater.select_candidate(self.entries,
                                             [self.release("7.2.10"), self.release("7.2.11", 2)],
                                             current="7.2.9")
-        self.assertIsNone(selected)
+        self.assertEqual(selected["release"], "cachyos-7.2.11-2")
 
     def test_requires_uploaded_matching_source_asset(self):
         releases = [self.release("7.2.11", assets=[]), self.release()]
@@ -179,6 +211,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), original)
 
     def test_no_update_reports_false(self):
+        self.mark_current()
         output = self.root / "outputs"
         with patch.object(updater, "ROOT", self.root), \
                 patch.object(updater, "fetch_releases", return_value=[]), \
@@ -187,6 +220,48 @@ class UpdateTests(unittest.TestCase):
                 patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
             updater.main()
         self.assertEqual(output.read_text(), "update=false\n")
+
+    def test_missing_recipe_provenance_proposes_existing_source_migration(self):
+        candidate, inputs = updater.discover(self.root, self.entries, [], "7.2.9")
+        self.assertEqual(candidate["release"], "cachyos-7.2.9-2")
+        self.assertEqual(candidate["debian_revision"], 2)
+        self.assertEqual(candidate["input_identity"], inputs["identity"])
+
+    def test_patch_only_changes_propose_new_revision_and_branch(self):
+        self.mark_current()
+        with patch.object(updater.patchsets, "upstream_index", return_value=("d" * 40, {
+                "7.2/sched/0001-bore-cachy.patch": {"sha": "e" * 40}})):
+            candidate, _ = updater.discover(self.root, self.entries, [], "7.2.9")
+        self.assertEqual(candidate["debian_revision"], 2)
+        self.assertTrue(candidate["branch"].startswith("codex/linux-7.2.9-r2-"))
+
+    def test_irrelevant_upstream_patch_commit_does_not_propose_update(self):
+        self.mark_current()
+        with patch.object(updater.patchsets, "upstream_index", return_value=("d" * 40, {
+                "7.2/sched/0001-bore-cachy.patch": {"sha": "b" * 40},
+                "7.2/misc/unselected.patch": {"sha": "f" * 40}})):
+            self.assertEqual(updater.discover(self.root, self.entries, [], "7.2.9"), (None, None))
+
+    def test_recipe_and_config_changes_are_detected(self):
+        self.mark_current()
+        original = self.recipe("cachyos-7.2.9-2")
+        for key in ("sha256", "config_sha256"):
+            with self.subTest(key=key), patch.object(updater.patchsets, "recipe_snapshot", return_value=(
+                    {**original[0], key: "f" * 64}, original[1])):
+                self.assertIsNotNone(updater.discover(self.root, self.entries, [], "7.2.9")[0])
+
+    def test_changed_published_digest_of_existing_tag_requires_review(self):
+        with self.assertRaisesRegex(ValueError, "digest changed"):
+            updater.discover(self.root, self.entries, [self.release("7.2.9", 2)], "7.2.9")
+
+    def test_input_race_aborts_before_archive_download(self):
+        with patch.object(updater, "ROOT", self.root), \
+                patch.object(updater, "fetch_releases", return_value=[self.release()]), \
+                patch.object(updater, "archive_hash") as download, \
+                patch("sys.argv", ["update_kernel.py", "--apply", "--expected-input-id", "f" * 64]):
+            with self.assertRaisesRegex(ValueError, "candidate inputs changed"):
+                updater.main()
+        download.assert_not_called()
 
     def test_cli_reports_missing_keys_and_subprocess_failures(self):
         script = self.root / "scripts/update_kernel.py"

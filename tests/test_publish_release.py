@@ -93,7 +93,7 @@ class ReleaseFixture(unittest.TestCase):
 
     def checksums(self, folder):
         # Use the same command as the build instead of mirroring its implementation.
-        files = sorted(path.name for path in folder.glob("*.deb")) + ["install-packages.sh"]
+        files = sorted(path.name for path in folder.iterdir() if path.is_file() and path.name != 'SHA256SUMS')
         result = self.real_run(["sha256sum", *files], cwd=folder,
                                capture_output=True, text=True, check=True)
         (folder / "SHA256SUMS").write_text(result.stdout)
@@ -128,6 +128,41 @@ class ReleaseFixture(unittest.TestCase):
 
 
 class ReleaseTests(ReleaseFixture):
+    def test_revisioned_bundle_requires_matching_tracking_dependencies_and_checksums(self):
+        folder = self.bundle()
+        release = '7.3.4-psycachy-llvm-r3'
+        version = '7.3.4-6'
+        for path in list(folder.glob('*.deb')):
+            fields = self.packages.pop(path.name)
+            fields['Package'] = fields['Package'].replace('7.3.4-psycachy-llvm', release)
+            fields['Version'] = version
+            target = path.with_name(f"{fields['Package']}_{version}_amd64.deb")
+            path.rename(target)
+            self.packages[target.name] = fields
+        for kind in ('image', 'headers'):
+            name = f'linux-{kind}-psycachy-llvm'
+            path = folder / f'{name}_{version}_amd64.deb'
+            path.write_text('tracking package fixture\n')
+            self.packages[path.name] = {'Package': name, 'Version': version, 'Architecture': 'amd64',
+                                       'Depends': f'linux-{kind}-{release} (= {version})'}
+        validation = folder / 'NVIDIA-VALIDATION.txt'
+        validation.write_text(validation.read_text().replace('7.3.4-psycachy-llvm', release))
+        (folder / 'PACKAGE-BUILD.json').write_text(json.dumps({
+            'kernel_release': release, 'package_version': version, 'toolchain': 'clang-thinlto'}))
+        (folder / 'OPTIMIZATIONS.json').write_text(json.dumps({'profile': 'full'}))
+        self.checksums(folder)
+        self.verify(folder)
+        meta = next(folder.glob('linux-headers-psycachy-llvm_*.deb'))
+        self.packages[meta.name]['Depends'] = 'linux-headers-unrelated (= 1)'
+        with self.assertRaisesRegex(ValueError, 'tracking package dependency'):
+            self.verify(folder)
+
+    def test_userspace_libc_headers_are_optional_for_release_publication(self):
+        folder = self.bundle()
+        next(folder.glob('linux-libc-dev_*.deb')).unlink()
+        self.checksums(folder)
+        self.verify(folder)
+
     def test_metadata_drives_different_kernel_versions(self):
         for version in ("6.18.56", "7.3.4", "8.0.12"):
             with self.subTest(version=version):
@@ -169,7 +204,7 @@ class ReleaseTests(ReleaseFixture):
             self.verify(folder)
 
     def test_every_required_package_must_exist(self):
-        for prefix in ("linux-image-", "linux-headers-", "linux-libc-dev_", "psycachy-nvidia-support_"):
+        for prefix in ("linux-image-", "linux-headers-", "psycachy-nvidia-support_"):
             with self.subTest(prefix=prefix):
                 folder = self.bundle()
                 next(folder.glob(prefix + "*.deb")).unlink()

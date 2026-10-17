@@ -1,6 +1,17 @@
 {
   "7.2.10": {
-    "snapshot": "c3a5ac872ccd8404426b5ad3f1daaef82e145723f3902530a9a454bc0af9b2c8",
+    "debian_revision": 2,
+    "history": [
+      {
+        "debian_revision": 1,
+        "snapshot": "c3a5ac872ccd8404426b5ad3f1daaef82e145723f3902530a9a454bc0af9b2c8",
+        "source_release": "cachyos-7.2.10-1",
+        "source_sha256": "02af8a6115596d20e9998926953f2040f8d7f66ca1122f399c5920a9601f1cef"
+      }
+    ],
+    "input_identity": "0652aaa4711443f22edd4daf17fe2db7b97d7c15b47666f962f15b6cdd9fcb7f",
+    "snapshot": "5914c2737b2935e6b94d3942cb65f83eac502657b679d3e7370a974737e8769f",
+    "source_release": "cachyos-7.2.10-1",
     "source_sha256": "02af8a6115596d20e9998926953f2040f8d7f66ca1122f399c5920a9601f1cef"
   },
   "7.2.9": {

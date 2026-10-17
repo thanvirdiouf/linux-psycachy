@@ -5,11 +5,12 @@ if [ "$1" = configure ]; then
     driver_version=$(dkms status -m nvidia | sed -n 's@^nvidia/\([^, /]*\).*@\1@p' | sort -Vu | tail -n 1)
     [ -n "$driver_version" ] || exit 0
     # Also handle adding support after a PsyCachy kernel was already installed.
-    for config in /lib/modules/*-psycachy-llvm/build/.config; do
+    for config in /lib/modules/*-psycachy-llvm*/build/.config; do
         [ -f "$config" ] || continue
         grep -qx 'CONFIG_CC_IS_CLANG=y' "$config" || continue
         kernel=${config#/lib/modules/}
         kernel=${kernel%/build/.config}
+        printf '%s\n' "$kernel" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm(-minimal)?(-r[1-9][0-9]*)?$' || continue
         dkms install -m nvidia -v "$driver_version" -k "$kernel"
         if [ -f "/boot/initrd.img-$kernel" ] && command -v update-initramfs >/dev/null; then
             update-initramfs -u -k "$kernel"

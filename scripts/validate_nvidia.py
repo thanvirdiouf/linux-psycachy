@@ -21,12 +21,12 @@ def validate(packages, work, archive=None):
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pin["version"]) or not re.fullmatch(r"[a-f0-9]{64}", pin["sha256"]):
         raise ValueError("Invalid NVIDIA validation pin")
     packages = Path(packages).resolve()
-    headers = list(packages.glob("linux-headers-*-psycachy-llvm_*.deb"))
+    headers = list(packages.glob("linux-headers-*-psycachy-llvm*.deb"))
     if len(headers) != 1:
         raise ValueError("Expected exactly one PsyCachy LLVM headers package")
     name = subprocess.check_output(["dpkg-deb", "--field", str(headers[0]), "Package"], text=True).strip()
     kernel = name.removeprefix("linux-headers-")
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm", kernel):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-psycachy-llvm(?:-minimal)?(?:-r[1-9][0-9]*)?", kernel):
         raise ValueError("Invalid headers kernel release")
     work = Path(work).resolve()
     work.mkdir(parents=True, exist_ok=True)

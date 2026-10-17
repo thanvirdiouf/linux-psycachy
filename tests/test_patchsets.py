@@ -2,6 +2,7 @@
 """Exercise pinned patch snapshots with real offline tar and patch tools."""
 
 import hashlib
+import base64
 import io
 import json
 import os
@@ -39,6 +40,21 @@ class PatchsetTests(unittest.TestCase):
             archive.add(self.tree, arcname="source")
         (self.root / "src/patches/common/0002-debian-headers-config.patch").write_bytes(self.diff("headers"))
         self.candidate = {"version": "7.2.10", "release": "cachyos-7.2.10-1"}
+        self.recipe_patch = patch.object(patchsets, "recipe_snapshot", side_effect=self.recipe)
+        self.recipe_patch.start()
+        self.addCleanup(self.recipe_patch.stop)
+
+    def recipe(self, release):
+        version, revision = release.removeprefix("cachyos-").rsplit("-", 1)
+        series, minor = version.rsplit(".", 1)
+        recipe = (f"_major={series}\n_minor={minor}\n_tagrel={revision}\n"
+                  "_srcname=cachyos-${_major}.${_minor}-${_tagrel}\n").encode()
+        config = b"CONFIG_CACHY=y\n"
+        return {"repository": patchsets.RECIPE_REPOSITORY, "commit": "c" * 40,
+                "path": "linux-cachyos/PKGBUILD", "config_path": "linux-cachyos/config",
+                "source_release": release, "sha256": hashlib.sha256(recipe).hexdigest(),
+                "config_sha256": hashlib.sha256(config).hexdigest()}, {
+                    "upstream-PKGBUILD": recipe, "upstream-config": config}
 
     @staticmethod
     def diff(name):
@@ -68,14 +84,19 @@ class PatchsetTests(unittest.TestCase):
         self.assertEqual(metadata["config"]["ACPI_CALL"], "m")
         self.assertEqual(metadata["config"]["HID_ASUS_ALLY"], "m")
         self.assertTrue((folder / "0009-debian-headers-config.patch").is_file())
+        self.assertTrue((folder / "upstream-PKGBUILD").is_file())
+        self.assertTrue((folder / "upstream-config").is_file())
+        self.assertEqual(metadata["recipe"]["source_release"], self.candidate["release"])
         self.assertEqual(list((self.root / "src").glob(".prepare-patches-*")), [])
 
-    def test_same_snapshot_is_reused_across_kernel_versions(self):
+    def test_identical_snapshot_is_reused_but_recipe_is_source_specific(self):
         first, _ = self.refresh()
+        self.assertEqual(first, self.refresh()[0])
         self.candidate["version"] = "7.2.11"
+        self.candidate["release"] = "cachyos-7.2.11-1"
         second, _ = self.refresh()
-        self.assertEqual(first, second)
-        self.assertEqual(len(list((self.root / "src/patches/snapshots").iterdir())), 1)
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(list((self.root / "src/patches/snapshots").iterdir())), 2)
 
     def test_disabled_features_are_not_fetched_or_configured(self):
         (self.root / "src/patches/profile.json").write_text('{"features": []}')
@@ -132,6 +153,59 @@ class PatchsetTests(unittest.TestCase):
         self.assertEqual(patchsets.load(self.root, "7.2.10")[1]["upstream_commit"], self.commit)
         (self.root / "src/releases.tsv").write_text("7.2.10 cachyos-7.2.10-1 " + "f" * 64)
         with self.assertRaisesRegex(ValueError, "pinned source"):
+            patchsets.load(self.root, "7.2.10")
+
+    def test_same_version_rebuild_preserves_previous_source_lock_and_snapshot(self):
+        first, _ = self.refresh()
+        self.lock(first)
+        (self.root / "src/default-version").write_text("7.2.10\n")
+        (self.root / "src/patches/SOURCES.md").write_text("Prior source\n")
+        self.candidate.update(release="cachyos-7.2.10-2", debian_revision=2)
+        second, metadata = self.refresh()
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        update_kernel.apply_candidate(self.root, self.candidate, digest, second, metadata)
+        lock = patchsets.release_locks(self.root)["7.2.10"]
+        self.assertEqual(lock["debian_revision"], 2)
+        self.assertEqual(lock["source_release"], "cachyos-7.2.10-2")
+        self.assertEqual(lock["history"], [{"source_release": "cachyos-7.2.10-1", "source_sha256": digest,
+                                           "snapshot": first, "debian_revision": 1}])
+        self.assertTrue(patchsets.verify_snapshot(self.root, first))
+        self.assertEqual(patchsets.load(self.root, "7.2.10")[1], metadata)
+        self.assertEqual(update_kernel.read_manifest(self.root)["7.2.10"], ("cachyos-7.2.10-2", digest))
+
+    def test_non_increasing_build_revision_is_rejected_before_lock_replacement(self):
+        first, _ = self.refresh()
+        self.lock(first)
+        (self.root / "src/default-version").write_text("7.2.10\n")
+        (self.root / "src/patches/SOURCES.md").write_text("Prior source\n")
+        lockfile = self.root / "src/patches/releases.json"
+        original = lockfile.read_bytes()
+        self.candidate.update(release="cachyos-7.2.10-2", debian_revision=1)
+        second, metadata = self.refresh()
+        with self.assertRaisesRegex(ValueError, "revision must increase"):
+            update_kernel.apply_candidate(self.root, self.candidate,
+                hashlib.sha256(self.archive.read_bytes()).hexdigest(), second, metadata)
+        self.assertEqual(lockfile.read_bytes(), original)
+
+    def test_recipe_files_are_checked_and_builder_cli_returns_pinned_config(self):
+        identity, metadata = self.refresh()
+        self.lock(identity)
+        helper = ["python3", str(Path(patchsets.__file__))]
+        output = subprocess.check_output(helper + ["base-config", str(self.root), "7.2.10"], text=True).strip()
+        config = self.root / "src/patches/snapshots" / identity / "upstream-config"
+        self.assertEqual(output, str(config))
+        self.assertEqual(subprocess.check_output(helper + ["debian-revision", str(self.root), "7.2.10"], text=True), "1\n")
+        config.write_text("corrupt\n")
+        with self.assertRaisesRegex(ValueError, "Recipe snapshot checksum"):
+            patchsets.verify_snapshot(self.root, identity)
+
+    def test_wrong_recipe_source_is_rejected(self):
+        identity, _ = self.refresh()
+        self.lock(identity)
+        self.candidate["release"] = "cachyos-7.2.10-2"
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        (self.root / "src/releases.tsv").write_text(f"7.2.10 cachyos-7.2.10-2 {digest}\n")
+        with self.assertRaisesRegex(ValueError, "recipe does not match"):
             patchsets.load(self.root, "7.2.10")
 
     def test_invalid_snapshot_path_is_rejected(self):
@@ -280,11 +354,15 @@ class PatchsetTests(unittest.TestCase):
             with self.subTest(features=features), self.assertRaises(ValueError):
                 patchsets.profile(self.root)
 
-    def test_discovery_does_not_refresh_patches_without_new_kernel(self):
+    def test_unchanged_inputs_do_not_refresh_or_download_source(self):
         (self.root / "src/releases.tsv").write_text("7.2.9 cachyos-7.2.9-2 " + "a" * 64)
         (self.root / "src/default-version").write_text("7.2.9\n")
+        with patch.object(patchsets, "upstream_index", return_value=(self.commit, self.entries)):
+            inputs = patchsets.discover_inputs(self.root, {"version": "7.2.9", "release": "cachyos-7.2.9-2"})
+        (self.root / "src/patches/releases.json").write_text(json.dumps({"7.2.9": {"input_identity": inputs["identity"]}}))
         with patch.object(update_kernel, "ROOT", self.root), \
                 patch.object(update_kernel, "fetch_releases", return_value=[]), \
+                patch.object(patchsets, "upstream_index", return_value=(self.commit, self.entries)), \
                 patch.object(patchsets, "refresh") as refresh, \
                 patch.object(update_kernel, "archive_hash") as download, \
                 patch("sys.argv", ["update_kernel.py", "--apply"]), \
@@ -365,6 +443,53 @@ class PatchsetTests(unittest.TestCase):
                 update_kernel.archive_hash(candidate, self.archive)
         self.assertEqual(self.archive.read_bytes(), before)
         self.assertFalse(Path(str(self.archive) + ".part").exists())
+
+
+class RecipeTests(unittest.TestCase):
+    @staticmethod
+    def recipe(minor=10):
+        return (f"_major=7.2\n_minor={minor}\n_tagrel=1\n"
+                "_srcname=cachyos-${_major}.${_minor}-${_tagrel}\n").encode()
+
+    def test_selects_matching_recipe_history_and_config_at_same_commit(self):
+        commits = [{"sha": character * 40} for character in "abc"]
+        def file(repository, commit, path):
+            self.assertEqual(repository, patchsets.RECIPE_REPOSITORY)
+            if path.endswith("/config"):
+                self.assertEqual(commit, "b" * 40)
+                return b"CONFIG_CACHY=y\n"
+            return self.recipe(11 if commit == "a" * 40 else 10)
+        with patch.object(patchsets, "api", return_value=commits), \
+                patch.object(patchsets, "git_file", side_effect=file) as fetch:
+            recipe, contents = patchsets.recipe_snapshot("cachyos-7.2.10-1")
+        self.assertEqual(recipe["commit"], "b" * 40)
+        self.assertEqual(contents["upstream-PKGBUILD"], self.recipe())
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_missing_compatible_recipe_fails_closed(self):
+        with patch.object(patchsets, "api", return_value=[{"sha": "a" * 40}]), \
+                patch.object(patchsets, "git_file", return_value=self.recipe(11)):
+            with self.assertRaisesRegex(ValueError, "No supported stable recipe snapshot"):
+                patchsets.recipe_snapshot("cachyos-7.2.10-1")
+
+    def test_dynamic_rc_and_duplicate_recipe_assignments_are_rejected(self):
+        for content in (self.recipe().replace(b"_minor=10", b"_minor=$(touch /tmp/not-executed)"),
+                        self.recipe() + b"_minor=11\n", self.recipe() + b"_minor=$(expr 10 + 1)\n",
+                        self.recipe() + b"_srcname=other\n", self.recipe() + b"_rcver=rc1\n",
+                        self.recipe().replace(b"_srcname=cachyos", b"_srcname=other")):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                patchsets.recipe_release(content)
+
+    def test_git_file_verifies_pinned_blob(self):
+        content = self.recipe()
+        blob = PatchsetTests.blob_sha(content)
+        entry = {"type": "file", "encoding": "base64", "content": base64.b64encode(content).decode(), "sha": blob}
+        with patch.object(patchsets, "api", return_value=entry) as fetch:
+            self.assertEqual(patchsets.git_file(patchsets.RECIPE_REPOSITORY, "a" * 40, "linux-cachyos/PKGBUILD"), content)
+        self.assertIn("ref=" + "a" * 40, fetch.call_args.args[0])
+        with patch.object(patchsets, "api", return_value={**entry, "sha": "f" * 40}):
+            with self.assertRaisesRegex(ValueError, "pinned Git blob"):
+                patchsets.git_file(patchsets.RECIPE_REPOSITORY, "a" * 40, "linux-cachyos/PKGBUILD")
 
 
 if __name__ == "__main__":

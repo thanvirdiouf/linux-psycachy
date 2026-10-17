@@ -35,6 +35,7 @@ class BuilderTests(unittest.TestCase):
             "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y\n"
             "CONFIG_TCP_CONG_BBR3=m\nCONFIG_MQ_IOSCHED_ADIOS=m\n"
             "CONFIG_CC_IS_GCC=y\nCONFIG_LTO_NONE=y\n"
+            "CONFIG_DEBUG_INFO_BTF=y\nCONFIG_DEBUG_INFO_BTF_MODULES=y\nCONFIG_SCHED_CLASS_EXT=y\n"
         )
 
         tree = self.root / "source"
@@ -53,6 +54,7 @@ class BuilderTests(unittest.TestCase):
         (self.repo / "scripts/patchsets.py").write_text(Path(patchsets.__file__).read_text())
         for name in ("package_nvidia.py", "install-packages.sh", "psycachy-ld"):
             shutil.copy2(BUILDER.parent / "scripts" / name, self.repo / "scripts" / name)
+        (self.repo / "scripts/collect_packages.py").write_text("# Collection has separate real-package integration tests.\n")
         shutil.copytree(BUILDER.parent / "packaging", self.repo / "packaging")
         shutil.copyfile(BUILDER.parent / "LICENSE", self.repo / "LICENSE")
 
@@ -75,6 +77,7 @@ class BuilderTests(unittest.TestCase):
         self.executable(binaries / "nproc", 'echo "${TEST_CPUS:-8}"')
         self.executable(binaries / "sudo", "echo 'Unexpected dependency installation' >&2; exit 99")
         self.executable(binaries / "ccache", 'exec "$@"')
+        self.executable(binaries / "pahole", 'echo v1.30')
         self.executable(
             binaries / "make",
             'echo "$*" >> "$BUILD_LOG"\n'
@@ -317,11 +320,27 @@ class BuilderTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("Kernel build complete", result.stdout)
 
-    def test_old_pahole_disables_btf_and_sched_ext(self):
+    def test_full_profile_rejects_old_pahole_without_silently_dropping_features(self):
         result = self.run_builder("7.2.9", "--prepare-only", TEST_PAHOLE="125")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Full builds require pahole >= 1.26", result.stdout)
+        self.assertNotIn("--disable SCHED_CLASS_EXT", self.config_log.read_text())
+
+    def test_minimal_profile_is_explicit_and_has_a_distinct_identity(self):
+        result = self.run_builder("7.2.9", BUILD_PROFILE="minimal", TEST_PAHOLE="125")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("disabling BTF and sched_ext", result.stdout)
         self.assertIn("--disable SCHED_CLASS_EXT", self.config_log.read_text())
+        self.assertIn("LOCALVERSION=-psycachy-minimal", self.log.read_text())
+        self.assertTrue((self.repo / "src/build-7.2.9-minimal").is_dir())
+
+    def test_builder_revision_increases_versions_for_both_compilers(self):
+        (self.repo / 'src/package-revision').write_text('2\n')
+        gcc = self.run_builder('7.2.9')
+        self.assertEqual(gcc.returncode, 0, gcc.stdout)
+        self.assertIn('KDEB_PKGVERSION=7.2.9-3', self.log.read_text())
+        clang = self.run_builder('7.2.9', TOOLCHAIN='')
+        self.assertEqual(clang.returncode, 0, clang.stdout)
+        self.assertIn('KDEB_PKGVERSION=7.2.9-4', self.log.read_text())
 
     def test_supplied_toolchain_can_skip_package_installation(self):
         binary = self.root / "bin" / "dpkg-query"
