@@ -224,14 +224,36 @@ On a manual run from `master`, check **Publish a GitHub Release after a successf
 The release job downloads that run's artifact, verifies its checksums, and
 publishes the packages and metadata as release assets.
 
-Release tags use `psycachy-<version>-build-<run-number>-<attempt>` and point to the
-built commit. Release assets remain available after Actions artifacts expire.
+Build-and-publish tags use `psycachy-<version>-build-<run-number>-<attempt>` and
+point to the built commit. Release assets remain available after Actions artifacts expire.
 Publication uses the repository secret `PSYCACHY_RELEASE_TOKEN`, which must
 allow release creation and asset uploads. The release job runs only on `master`.
 
 **Push, pull-request, and automated update builds upload artifacts without
 publishing releases.** To publish an already completed build without recompiling,
-download its artifact and attach the files to a release manually.
+run **Publish an existing kernel build** from the default branch and enter the
+successful build or kernel update workflow's run ID. The publisher discovers the
+kernel version and built commit from that run's package metadata; no version is
+hardcoded. Pull-request and fork builds are excluded from promotion.
+
+Before publication, it verifies the source provenance, package checksums, expected
+Debian packages, patch snapshot, and NVIDIA validation report. It uploads a draft,
+checks the release assets, and publishes a tag pointing to the exact built commit.
+Promotion tags use `psycachy-<version>-run-<run-id>-<attempt>` so run counters from
+different workflows cannot collide.
+Repeating a promotion verifies the existing release rather than creating a duplicate.
+The workflow uses `PSYCACHY_RELEASE_TOKEN` when configured, or its repository token
+with Actions read and contents write permissions.
+
+The same publisher can be used locally. To inspect a completed run without
+creating a release, authenticate `gh` and run:
+
+```bash
+python3 scripts/publish_release.py --repo thanvirdiouf/linux-psycachy --run-id RUN_ID --dry-run
+```
+
+Remove `--dry-run` to publish the verified packages. The publisher makes one check
+and stops if the build is not ready; it does not wait or poll.
 
 ## Automated updates
 

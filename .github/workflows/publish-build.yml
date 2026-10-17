@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0-only
+name: Publish an existing kernel build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful package build or kernel update workflow run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-kernel-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and publish existing packages
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out the publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Promote the successful build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PSYCACHY_RELEASE_TOKEN || github.token }}
+          BUILD_RUN_ID: ${{ inputs.run_id }}
+        run: python3 scripts/publish_release.py --repo "$GITHUB_REPOSITORY" --run-id "$BUILD_RUN_ID"
